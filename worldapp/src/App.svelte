@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { activeTab, commandOpen, restore, openTab, tabs } from './lib/browser.js';
+  import { activeTab, commandOpen, restore, openTab, switchTab, tabs } from './lib/browser.js';
   import { theme, applyTheme } from './lib/theme.js';
   import { toasts } from './lib/api.js';
   import BrowserChrome from './components/BrowserChrome.svelte';
@@ -13,8 +13,12 @@
   onMount(() => {
     applyTheme($theme);
     restore();
-    // 首次无任何标签时打开首页
-    if (!get(tabs).length) openTab('home');
+    // 启动时始终优先打开/激活开始页面。
+    // 浏览器仍保留其他标签，但不再因为上次停在小说页而直接进入小说创作。
+    const restoredTabs = get(tabs);
+    const homeTab = restoredTabs.find((tab) => tab.address === 'home');
+    if (homeTab) switchTab(homeTab.id);
+    else openTab('home');
 
     // 键盘快捷键
     const onKey = (e) => {

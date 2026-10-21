@@ -764,6 +764,9 @@ func (ws *worldServer) scanWorlds() {
 func (ws *worldServer) newInstance(name string) *worldInstance {
 	dir := filepath.Join(ws.baseDir, name)
 	w := &worldInstance{name: name, dir: dir, apiCfg: ws.apiCfg}
+	// 每个世界独立保存参考资料。创建新世界和重启加载旧世界都必须
+	// 初始化附件存储，否则上传接口会把 nil store 误报成“没有可用世界”。
+	w.attach = attach.NewStore(filepath.Join(dir, "attachments"))
 
 	// 加载世界书（worlds/../worldbooks/ 池）
 	wbPath := filepath.Join(ws.baseDir, "..", "worldbooks", name+".md")
@@ -841,7 +844,7 @@ func (ws *worldServer) autoEnableLLM(w *worldInstance) {
 		Model:      ws.apiCfg.Model,
 		APIKey:     ws.apiCfg.APIKey,
 		ModelTiers: ws.apiCfg.ModelTiers,
-	}}
+	}, WorldRefs: w.attachRefs()}
 	w.applyLLM()
 }
 
@@ -1683,7 +1686,9 @@ func (ws *worldServer) handleMemories(w http.ResponseWriter, r *http.Request) {
 		Actor    string            `json:"actor"`
 		Memories []sim.MemoryEntry `json:"memories"`
 	}
-	var out []actorMem
+	// Return [] rather than null when the world has no memories yet. The API
+	// contract is a list and clients should not need a special null branch.
+	out := make([]actorMem, 0)
 	actors := ms.Actors()
 	for _, a := range actors {
 		entries := ms.Recent(a, 20)

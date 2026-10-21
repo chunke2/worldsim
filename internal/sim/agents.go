@@ -33,6 +33,10 @@ func (c *LLMClient) CompleteTier(ctx context.Context, tier, system, user string)
 	if c == nil {
 		return "", fmt.Errorf("LLMClient 未初始化")
 	}
+	if refs := strings.TrimSpace(c.WorldRefs); refs != "" {
+		system += "\n\n【世界参考资料｜硬约束】\n" + refs +
+			"\n【执行要求】以上资料是当前世界的既定事实。不得与其冲突；资料未规定之处才可合理补充。"
+	}
 	if c.Mock != nil {
 		return c.Mock(system, user), nil
 	}

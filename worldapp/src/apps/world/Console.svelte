@@ -109,7 +109,7 @@
           ['selfheal', '🛠️', '监测']
         ] as [id, icon, label]}
           <button
-            class="btn btn-md {activeTab === id ? 'btn-primary font-medium' : 'btn-ghost'} gap-1.5"
+            class="btn btn-md {$activeTab === id ? 'btn-primary font-medium' : 'btn-ghost'} gap-1.5"
             on:click={() => activeTab.set(id)}
           >
             <span>{icon}</span>{label}

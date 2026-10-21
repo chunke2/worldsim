@@ -6,7 +6,10 @@
 
   async function load() {
     const d = await j('/api/world/memories');
-    if (d.memories !== undefined) memories = d.memories;
+    // The API may encode an empty Go slice as null. Keep the view model an
+    // array so the empty state can render without aborting Svelte's update
+    // cycle (which would also make the surrounding tab bar appear frozen).
+    memories = Array.isArray(d?.memories) ? d.memories : [];
   }
 
   $: if ($refreshTick) load();
