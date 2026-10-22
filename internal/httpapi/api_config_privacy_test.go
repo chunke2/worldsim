@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -30,6 +31,46 @@ func TestAPIConfigGetAndPutDoNotReturnSecrets(t *testing.T) {
 	saved, err := config.LoadAPIConfig(path)
 	if err != nil || saved.APIKey != cfg.APIKey || saved.ExtraBody["authorization"] != "BODY-CANARY" || saved.MaxTokens != 9000 {
 		t.Fatal("PUT erased stored credentials or advanced fields")
+	}
+}
+
+func TestLegacyConfigEndpointHonorsRevisionAndWorldActivity(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "api.json")
+	cfg := &config.APIConfig{Model: "before", ContextBudgetTokens: 10000}
+	if err := config.SaveAPIConfig(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{progDir: root, apiCfgPath: path, apiCfg: cfg}
+	get := httptest.NewRecorder()
+	h.GetAPIConfig(get, httptest.NewRequest("GET", "/api/config/api", nil))
+	var view map[string]any
+	if json.Unmarshal(get.Body.Bytes(), &view) != nil {
+		t.Fatal("invalid GET")
+	}
+	latest, err := config.ReadAPIConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest.Model = "changed"
+	if err := config.SaveAPIConfig(latest, path); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(view)
+	put := httptest.NewRecorder()
+	h.PutAPIConfig(put, httptest.NewRequest("PUT", "/api/config/api", bytes.NewReader(b)))
+	if put.Code != 409 {
+		t.Fatal("legacy endpoint ignored stale revision")
+	}
+	end, err := config.BeginWorldActivity(root, filepath.Join(root, "worlds", "running"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer end()
+	put = httptest.NewRecorder()
+	h.PutAPIConfig(put, httptest.NewRequest("PUT", "/api/config/api", bytes.NewBufferString(`{"model":"override"}`)))
+	if put.Code != 409 {
+		t.Fatal("legacy endpoint changed config during world simulation")
 	}
 }
 

@@ -36,6 +36,9 @@ type GenerationConfig struct {
 }
 
 func SaveAPIConfig(c *APIConfig, path string) error {
+	if err := ValidateSavedAgentReferences(path, c); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
@@ -52,6 +55,12 @@ func MergeAPIConfig(base *APIConfig, patch []byte) (*APIConfig, error) {
 	}
 	if fields == nil {
 		return nil, fmt.Errorf("API 配置必须是 JSON 对象")
+	}
+	if raw, ok := fields["revision"]; ok {
+		var revision string
+		if err := json.Unmarshal(raw, &revision); err != nil || revision != APIRevision(base) {
+			return nil, ErrRevisionConflict
+		}
 	}
 	var out APIConfig
 	if base != nil {

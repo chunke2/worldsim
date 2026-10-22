@@ -137,6 +137,7 @@ func PublicAPIConfig(c *APIConfig) map[string]any {
 		return map[string]any{}
 	}
 	view := map[string]any{
+		"revision": APIRevision(c),
 		"base_url": c.BaseURL, "url_strict": c.URLStrict, "model": c.Model,
 		"has_api_key": c.APIKey != "", "max_tokens": c.MaxTokens,
 		"http_timeout_seconds":  c.HTTPTimeoutSeconds,

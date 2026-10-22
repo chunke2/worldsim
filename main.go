@@ -216,6 +216,7 @@ func startWorldServer(worldDir string, apiCfg *config.APIConfig, ra *research.Ag
 	mux.HandleFunc("POST /api/worlds/select", ws.handleWorldSelect)
 	mux.HandleFunc("POST /api/worlds/create", ws.handleWorldCreate)
 	mux.HandleFunc("GET /api/world/state", ws.handleGetState)
+	ws.registerAgentRoutes(mux)
 	mux.HandleFunc("POST /api/world/proposal", ws.handleProposal)
 	mux.HandleFunc("POST /api/world/init", ws.handleInit)
 	mux.HandleFunc("GET /api/world/log", ws.handleLog)
@@ -458,6 +459,11 @@ func (ws *worldServer) handleLoopSet(w http.ResponseWriter, r *http.Request) {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "没有可用世界"})
 		return
 	}
+	endActivity, activityErr := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
 	if inst.sim == nil {
 		inst.sim = sim.NewSimulator(inst.engine, inst.dir)
 		if inst.heroName != "" {
@@ -480,6 +486,7 @@ func (ws *worldServer) handleLoopSet(w http.ResponseWriter, r *http.Request) {
 	ws.loopTarget = inst.engine.State().Day + req.Days
 	ws.loopWorld = inst.name
 	go func() {
+		defer endActivity()
 		defer func() {
 			// 后台 goroutine 无 HTTP 中间件兜底，panic 会崩掉整个进程；这里恢复并复位循环状态
 			if r := recover(); r != nil {
@@ -685,6 +692,12 @@ func (ws *worldServer) handleRewind(w http.ResponseWriter, r *http.Request) {
 	ws.loopCancel = nil
 	ws.loopMu.Unlock()
 
+	endActivity, activityErr := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
+	defer endActivity()
 	meta, err := inst.sim.RewindTo(req.Day)
 	if err != nil {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
@@ -1123,6 +1136,12 @@ func (ws *worldServer) handleProposal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var p engine.Proposal
+	endActivity, activityErr := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
+	defer endActivity()
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		ws.writeJSON(w, 400, map[string]string{"error": "提案JSON解析失败: " + err.Error()})
 		return
@@ -1163,6 +1182,12 @@ func (ws *worldServer) handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	endActivity, activityErr := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
+	defer endActivity()
 	var req struct {
 		WorldName   string `json:"world_name"`
 		City        string `json:"city"`
@@ -1358,6 +1383,12 @@ func (ws *worldServer) handleSimDay(w http.ResponseWriter, r *http.Request) {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "没有可用世界，请先创建"})
 		return
 	}
+	endActivity, activityErr := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
+	defer endActivity()
 
 	// 后台循环进行中禁止手动跑天：同一 Simulator 被并发 RunDay 会数据竞争（day 双跳/编年史错乱）
 	ws.loopMu.Lock()
@@ -1455,6 +1486,14 @@ func (ws *worldServer) handleChronicle(w http.ResponseWriter, r *http.Request) {
 // POST /api/world/sim/llm — 配置 LLM Agent（mock=本地模拟测试 / real=真实API）
 // body: {"mode":"mock"} 或 {"mode":"real","base_url":"https://api.deepseek.com","model":"deepseek-chat","api_key":"sk-..."}
 func (ws *worldServer) handleSetLLM(w http.ResponseWriter, r *http.Request) {
+	endActivity, activityErr := config.BeginProviderEdit(filepath.Dir(ws.baseDir))
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
+	defer endActivity()
+	unlockAPI := config.LockAPIFile(ws.apiConfigPath())
+	defer unlockAPI()
 	inst := ws.inst()
 	if inst == nil {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "没有可用世界，请先创建"})
@@ -1505,7 +1544,7 @@ func (ws *worldServer) handleSetLLM(w http.ResponseWriter, r *http.Request) {
 		}
 		merged, err := config.MergeAPIConfig(base, raw)
 		if err != nil {
-			ws.writeJSON(w, 400, map[string]string{"error": err.Error()})
+			ws.agentConfigError(w, err)
 			return
 		}
 		if len(merged.ModelTiers) == 0 {
@@ -1622,6 +1661,12 @@ func (ws *worldServer) handleWorldCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	dir := filepath.Join(ws.baseDir, name)
+	endActivity, activityErr := config.BeginWorldActivity(filepath.Dir(ws.baseDir), dir)
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
+	defer endActivity()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		ws.writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1907,6 +1952,12 @@ func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Reques
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "模拟器未初始化"})
 		return
 	}
+	endActivity, activityErr := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
+	if activityErr != nil {
+		ws.agentConfigError(w, activityErr)
+		return
+	}
+	defer endActivity()
 	_, pov, identityErr := engine.ResolveIdentity(inst.engine.State())
 	if identityErr != nil {
 		ws.writeJSON(w, 409, map[string]any{"ok": false, "error": identityErr.Error()})

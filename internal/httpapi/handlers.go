@@ -57,6 +57,7 @@ type Handlers struct {
 	activeWork  int
 	taskCtx     context.Context
 	taskCancel  context.CancelFunc
+	activityEnd func()
 	taskTokens  *llm.TaskTokenUsage
 	autoConfirm bool // 自动确认模式：章节生成完成后自动确认并继续生成下一章
 
@@ -215,6 +216,19 @@ func (h *Handlers) tryStartTask() bool {
 	if h.taskRunning || h.activeWork > 0 {
 		return false
 	}
+	end, err := config.BeginWorldActivity(h.progDir, h.projectDir())
+	if err != nil {
+		return false
+	}
+	unlock := config.LockAPIFile(h.apiCfgPath)
+	latest, err := config.ReadAPIConfig(h.apiCfgPath)
+	unlock()
+	if err != nil {
+		end()
+		return false
+	}
+	h.apiCfg = latest
+	h.activityEnd = end
 	h.taskRunning = true
 	h.activeWork = 1
 	ctx, cancel := context.WithCancel(context.Background())
@@ -230,6 +244,10 @@ func (h *Handlers) endTask() {
 	if h.activeWork <= 0 {
 		h.activeWork = 0
 		h.taskRunning = false
+		if h.activityEnd != nil {
+			h.activityEnd()
+			h.activityEnd = nil
+		}
 		if h.taskCancel != nil {
 			h.taskCancel()
 			h.taskCancel = nil
@@ -312,10 +330,27 @@ func (h *Handlers) PostTaskStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetAPIConfig(w http.ResponseWriter, r *http.Request) {
-	h.writeJSON(w, http.StatusOK, config.PublicAPIConfig(h.apiCfg))
+	unlock := config.LockAPIFile(h.apiCfgPath)
+	defer unlock()
+	c, err := config.ReadAPIConfig(h.apiCfgPath)
+	if err != nil {
+		h.writeErrorReq(w, r, 500, "load_api_config_failed", "configuration unavailable")
+		return
+	}
+	view := config.PublicAPIConfig(c)
+	view["revision"] = config.APIRevision(c)
+	h.writeJSON(w, http.StatusOK, view)
 }
 
 func (h *Handlers) PutAPIConfig(w http.ResponseWriter, r *http.Request) {
+	end, err := config.BeginProviderEdit(h.progDir)
+	if err != nil {
+		h.writeErrorReq(w, r, 409, "invalid_json", err.Error())
+		return
+	}
+	defer end()
+	unlock := config.LockAPIFile(h.apiCfgPath)
+	defer unlock()
 	if h.rejectIfTaskRunning(w, r) {
 		return
 	}
@@ -331,7 +366,11 @@ func (h *Handlers) PutAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	merged, err := config.MergeAPIConfig(base, patch)
 	if err != nil {
-		h.writeErrorReq(w, r, 400, "invalid_json", err.Error())
+		status := 400
+		if errors.Is(err, config.ErrRevisionConflict) {
+			status = 409
+		}
+		h.writeErrorReq(w, r, status, "invalid_json", err.Error())
 		return
 	}
 	newCfg := *merged
@@ -347,12 +386,7 @@ func (h *Handlers) PutAPIConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	data, err := json.MarshalIndent(newCfg, "", "  ")
-	if err != nil {
-		h.writeErrorReq(w, r, http.StatusInternalServerError, "serialize_api_config_failed", err.Error())
-		return
-	}
-	if err := fsutil.WriteFileAtomic(h.apiCfgPath, data); err != nil {
+	if err := config.SaveAPIConfig(&newCfg, h.apiCfgPath); err != nil {
 		h.writeErrorReq(w, r, http.StatusInternalServerError, "save_api_config_failed", err.Error())
 		return
 	}
