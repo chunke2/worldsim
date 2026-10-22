@@ -36,6 +36,8 @@ type Observation struct {
 	SourceID      string         `json:"source_id"`
 	EventID       string         `json:"event_id,omitempty"`
 	WorldRevision int            `json:"world_revision"`
+	Speaker       string         `json:"speaker,omitempty"`
+	Location      string         `json:"location,omitempty"`
 	AddedRevision int            `json:"added_revision"`
 }
 
@@ -155,6 +157,9 @@ func validateCognition(d CognitionState, owner CognitionOwner) error {
 		if !cognitionID(o.ID) || seen[o.ID] != 0 || o.Recipient != owner || !cognitionText(o.Text) || !cognitionID(o.SourceID) || o.WorldRevision < 0 || o.AddedRevision < 1 || o.AddedRevision > d.Revision {
 			return bad("observation identity, recipient or provenance")
 		}
+		if (o.Speaker != "" && !cognitionID(o.Speaker)) || (o.Location != "" && !cognitionText(o.Location)) {
+			return bad("observation speaker or location")
+		}
 		switch o.Kind {
 		case "direct_observation", "public_statement", "private_report", "rumor":
 			if !cognitionID(o.EventID) || o.WorldRevision < 1 {
@@ -262,6 +267,10 @@ func (s *CognitionStore) Read() (CognitionState, error) {
 func (s *CognitionStore) Append(expectedRevision int, observations []Observation, records []CognitionRecord) (CognitionState, error) {
 	s.registry.mu.Lock()
 	defer s.registry.mu.Unlock()
+	return s.appendLocked(expectedRevision, observations, records)
+}
+
+func (s *CognitionStore) appendLocked(expectedRevision int, observations []Observation, records []CognitionRecord) (CognitionState, error) {
 	d, err := s.readLocked()
 	if err != nil {
 		return CognitionState{}, err

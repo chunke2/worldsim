@@ -16,3 +16,16 @@ func (s *Simulator) ReconcileCharacterAgents() error {
 	_, err = registry.Reconcile(state)
 	return err
 }
+
+// SyncCharacterObservations is the explicit bridge for the independent runtime.
+// It never invokes models, consumes EventCard.Frame or changes world facts.
+func (s *Simulator) SyncCharacterObservations() (characteragent.DeliveryReport, error) {
+	if err := s.ReconcileCharacterAgents(); err != nil {
+		return characteragent.DeliveryReport{}, err
+	}
+	p, err := characteragent.NewVisibilityProjector(s.worldDir)
+	if err != nil {
+		return characteragent.DeliveryReport{}, err
+	}
+	return p.DeliverAll()
+}

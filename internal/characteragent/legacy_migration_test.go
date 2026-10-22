@@ -46,7 +46,7 @@ func migrationTree(t *testing.T, root string) map[string]string {
 		}
 		if !entry.IsDir() {
 			relative, _ := filepath.Rel(root, path)
-			result[relative] = legacyHash(mustCognitionBytes(t, path))
+			result[relative] = privateHash(mustCognitionBytes(t, path))
 		}
 		return nil
 	})
@@ -91,7 +91,7 @@ func TestLegacyMigrationFiveActorPreviewApplyAndRetry(t *testing.T) {
 			if !bytes.Equal(source, mustCognitionBytes(t, filepath.Join(dir, legacyMemoryFile))) || !bytes.Equal(source, mustCognitionBytes(t, filepath.Join(dir, "memory_migrations", plan.ID, "source.json"))) {
 				t.Fatal("source or snapshot changed")
 			}
-			if before[filepath.Join("agents", a.Owner().AgentID, CognitionFile)] != legacyHash(mustCognitionBytes(t, a.path())) {
+			if before[filepath.Join("agents", a.Owner().AgentID, CognitionFile)] != privateHash(mustCognitionBytes(t, a.path())) {
 				t.Fatal("migration changed cognition")
 			}
 			for _, actor := range plan.Actors {

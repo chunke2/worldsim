@@ -70,3 +70,55 @@ func TestSnapshotRewindReconcilesAgentLifecycle(t *testing.T) {
 		t.Fatal("registry rewind changed private files")
 	}
 }
+
+func TestSyncCharacterObservationsUsesOnlyCommittedLocalEvidence(t *testing.T) {
+	dir := t.TempDir()
+	e := engine.NewStateEngine(engine.Rules{}, filepath.Join(dir, "event_log.jsonl"))
+	e.State().Revision = 1
+	e.State().WorldLevel.Protagonist = "A"
+	e.State().Entities = map[string]engine.Entity{
+		"A": {Alive: true, Status: "active", Location: "room", Extra: map[string]any{"secret": "GLOBAL-PRIVATE-CANARY"}},
+		"B": {Alive: true, Status: "active", Location: "room"},
+		"C": {Alive: true, Status: "active", Location: "corridor"},
+	}
+	s := NewSimulator(e, dir)
+	calls := 0
+	s.EnableLLM(&LLMClient{Mock: func(_, _ string) string { calls++; return "{}" }})
+	if err := e.Submit(context.Background(), &engine.Proposal{CommandID: "whisper", ActorID: "world_agent", BaseRevision: 1, Type: "adjudication", Reason: "AUTHOR-PRIVATE-CANARY", Occurrences: []engine.Occurrence{{Kind: "utterance", Actor: "A", Content: "private speech", Location: "room", Audience: []string{"A", "B"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.Snapshot()
+	report, err := s.SyncCharacterObservations()
+	if err != nil || report.Added != 2 || calls != 0 {
+		t.Fatal("bridge failed or invoked model", err)
+	}
+	for _, id := range []string{"A", "B", "C"} {
+		store, err := characteragent.NewCognitionStore(dir, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := store.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 1
+		if id == "C" {
+			want = 0
+		}
+		if len(state.Observations) != want || len(state.Records) != 0 {
+			t.Fatal("bridge crossed audience or generated beliefs")
+		}
+		for _, o := range state.Observations {
+			if o.Text != "private speech" || o.Speaker != "A" {
+				t.Fatal("bridge used author text or world state")
+			}
+		}
+	}
+	after, _ := e.Snapshot()
+	if before.Revision != after.Revision || before.Entities["A"].Extra["secret"] != after.Entities["A"].Extra["secret"] {
+		t.Fatal("bridge changed world facts")
+	}
+	if report, err := s.SyncCharacterObservations(); err != nil || report.Added != 0 {
+		t.Fatal("bridge duplicated observations")
+	}
+}
