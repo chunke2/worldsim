@@ -30,6 +30,8 @@ type WorldState struct {
 	Entities   map[string]Entity `json:"entities"`
 }
 type WorldLevel struct {
+	Protagonist     string              `json:"protagonist,omitempty"`
+	NarrativePOV    string              `json:"narrative_pov,omitempty"`
 	GlobalEvents    []string            `json:"global_events"`
 	Factions        map[string]Faction  `json:"factions"`
 	Locations       map[string]Location `json:"locations,omitempty"` // 地点系统（P0-2：状态会变）
@@ -89,24 +91,37 @@ type Change struct {
 }
 
 type Proposal struct {
-	CommandID    string   `json:"command_id"`
-	ActorID      string   `json:"actor_id"`
-	BaseRevision int      `json:"base_revision"`
-	Type         string   `json:"type"` // state_change | adjudication
-	Changes      []Change `json:"changes"`
-	Reason       string   `json:"reason,omitempty"`
-	SourceEvents []string `json:"source_events,omitempty"`
+	Occurrences  []Occurrence `json:"occurrences,omitempty"`
+	CommandID    string       `json:"command_id"`
+	ActorID      string       `json:"actor_id"`
+	BaseRevision int          `json:"base_revision"`
+	Type         string       `json:"type"` // state_change | adjudication
+	Changes      []Change     `json:"changes"`
+	Reason       string       `json:"reason,omitempty"`
+	SourceEvents []string     `json:"source_events,omitempty"`
 }
 
 // ---------- 事件日志（事件溯源） ----------
 
 type LogEntry struct {
-	CommandID string   `json:"command_id"`
-	ActorID   string   `json:"actor_id"`
-	Revision  int      `json:"revision"`
-	Timestamp string   `json:"timestamp"`
-	Day       int      `json:"day"`
-	Changes   []Change `json:"changes"`
+	Occurrences  []Occurrence `json:"occurrences,omitempty"`
+	Reason       string       `json:"reason,omitempty"`
+	SourceEvents []string     `json:"source_events,omitempty"`
+	CommandID    string       `json:"command_id"`
+	ActorID      string       `json:"actor_id"`
+	Revision     int          `json:"revision"`
+	Timestamp    string       `json:"timestamp"`
+	Day          int          `json:"day"`
+	Changes      []Change     `json:"changes"`
+}
+
+// Occurrence records observable evidence; a claim made in speech is not a true fact.
+type Occurrence struct {
+	Kind     string   `json:"kind"` // observation | utterance
+	Content  string   `json:"content"`
+	Actor    string   `json:"actor"`
+	Audience []string `json:"audience"`
+	Location string   `json:"location"`
 }
 
 // ---------- 软规则回调：由世界 Agent（GM）实现 ----------
@@ -155,10 +170,37 @@ func (e *StateEngine) Submit(ctx context.Context, p *Proposal) error {
 		return &RevisionConflictError{Expected: e.state.Revision, Got: p.BaseRevision}
 	}
 
-	// 容错：过滤非法路径的变更（LLM可能输出 entities.xxx 缺字段等，忽略而非让整天失败）
-	p.Changes = SanitizeChanges(p.Changes)
+	for _, c := range p.Changes {
+		if c.Op != "set" && c.Op != "add" && c.Op != "del" {
+			return fmt.Errorf("unsupported operation: %s", c.Op)
+		}
+		parts := strings.Split(c.Path, ".")
+		if len(parts) >= 2 && parts[0] == "entities" && strings.TrimSpace(parts[1]) == "" {
+			return fmt.Errorf("实体 ID 不得为空: %s", c.Path)
+		}
+	}
+	if len(SanitizeChanges(p.Changes)) != len(p.Changes) {
+		return fmt.Errorf("提案含非法路径")
+	}
 
 	// 1. 硬约束（程序）
+	for _, o := range p.Occurrences {
+		if o.Kind != "observation" && o.Kind != "utterance" {
+			return fmt.Errorf("invalid occurrence kind")
+		}
+		if strings.TrimSpace(o.Content) == "" || len(o.Audience) == 0 {
+			return fmt.Errorf("occurrence requires content and recipients")
+		}
+		if _, ok := e.state.Entities[o.Actor]; !ok || o.Actor == "" {
+			return fmt.Errorf("unknown occurrence actor")
+		}
+		for _, name := range o.Audience {
+			ent, ok := e.state.Entities[name]
+			if !ok || name == "" || ent.Location != o.Location || o.Location == "" {
+				return fmt.Errorf("occurrence recipient is not at location: %s", name)
+			}
+		}
+	}
 	if err := e.applyHard(p); err != nil {
 		return fmt.Errorf("硬约束校验失败: %w", err)
 	}
@@ -170,25 +212,41 @@ func (e *StateEngine) Submit(ctx context.Context, p *Proposal) error {
 		}
 	}
 
-	// 3. Reducer 原子提交
+	// Validate and reduce on a deep copy; publish only after the journal write succeeds.
+	b, err := json.Marshal(e.state)
+	if err != nil {
+		return err
+	}
+	var next WorldState
+	if err := json.Unmarshal(b, &next); err != nil {
+		return err
+	}
 	for _, c := range p.Changes {
-		if err := ApplyPath(e.state, c); err != nil {
+		validator := &StateEngine{state: &next, rules: e.rules}
+		if err := validator.checkNumericAndEnum(c); err != nil {
+			return err
+		}
+		if err := ApplyPath(&next, c); err != nil {
 			return fmt.Errorf("应用变更 %s 失败: %w", c.Path, err)
 		}
 	}
-	e.state.Revision++
+	next.Revision++
 
 	// 4. 事件日志
 	if err := e.appendLog(LogEntry{
-		CommandID: p.CommandID,
-		ActorID:   p.ActorID,
-		Revision:  e.state.Revision,
-		Timestamp: time.Now().Format(time.RFC3339),
-		Day:       e.state.Day,
-		Changes:   p.Changes,
+		Occurrences:  p.Occurrences,
+		Reason:       p.Reason,
+		SourceEvents: p.SourceEvents,
+		CommandID:    p.CommandID,
+		ActorID:      p.ActorID,
+		Revision:     next.Revision,
+		Timestamp:    time.Now().Format(time.RFC3339),
+		Day:          next.Day,
+		Changes:      p.Changes,
 	}); err != nil {
 		return fmt.Errorf("写入事件日志失败: %w", err)
 	}
+	*e.state = next
 	return nil
 }
 
@@ -279,9 +337,14 @@ func (e *StateEngine) appendLog(entry LogEntry) error {
 		return err
 	}
 	defer f.Close()
-	b, _ := json.Marshal(entry)
-	_, err = f.Write(append(b, '\n'))
-	return err
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 func (e *StateEngine) logHasCommand(cmdID string) bool {
@@ -335,18 +398,31 @@ func Replay(logPath string, targetRevision int, init *WorldState) (*WorldState, 
 	if err != nil {
 		return nil, err
 	}
-	state := init
+	b, err := json.Marshal(init)
+	if err != nil {
+		return nil, err
+	}
+	state := &WorldState{}
+	if err := json.Unmarshal(b, state); err != nil {
+		return nil, err
+	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		var entry LogEntry
-		if json.Unmarshal([]byte(line), &entry) != nil {
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			return nil, fmt.Errorf("事件日志损坏: %w", err)
+		}
+		if entry.Revision <= state.Revision {
 			continue
 		}
 		if entry.Revision > targetRevision {
 			break
+		}
+		if entry.Revision != state.Revision+1 {
+			return nil, fmt.Errorf("事件 revision 不连续: %d", entry.Revision)
 		}
 		for _, c := range entry.Changes {
 			if err := ApplyPath(state, c); err != nil {
@@ -354,6 +430,7 @@ func Replay(logPath string, targetRevision int, init *WorldState) (*WorldState, 
 			}
 		}
 		state.Revision = entry.Revision
+		state.Day = entry.Day
 	}
 	return state, nil
 }
@@ -393,6 +470,9 @@ func ApplyPath(s *WorldState, c Change) error {
 			return fmt.Errorf("entities 路径需至少3段: %s", c.Path)
 		}
 		name := parts[1]
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("实体 ID 为空")
+		}
 		ent, ok := s.Entities[name]
 		if !ok {
 			ent = Entity{Alive: true, Status: "active", Health: 100, Relationship: map[string]float64{}, Stats: map[string]any{}}
@@ -426,9 +506,11 @@ func ApplyPath(s *WorldState, c Change) error {
 func setEntityField(e *Entity, field string, v any, op string, rest []string) error {
 	switch field {
 	case "location":
-		if op == "set" {
-			e.Location, _ = v.(string)
+		value, ok := v.(string)
+		if op != "set" || !ok || strings.TrimSpace(value) == "" {
+			return fmt.Errorf("location requires nonempty set text")
 		}
+		e.Location = value
 	case "health", "money":
 		f, ok := toFloat(v)
 		if !ok {
@@ -440,22 +522,33 @@ func setEntityField(e *Entity, field string, v any, op string, rest []string) er
 			e.Money = f
 		}
 	case "job":
-		if op == "set" {
-			e.Job, _ = v.(string)
+		value, ok := v.(string)
+		if op != "set" || !ok {
+			return fmt.Errorf("job requires set text")
 		}
+		e.Job = value
 	case "alive":
-		if op == "set" {
-			e.Alive, _ = v.(bool)
+		value, ok := v.(bool)
+		if op != "set" || !ok {
+			return fmt.Errorf("alive requires set boolean")
 		}
+		e.Alive = value
 	case "status":
-		if op == "set" {
-			e.Status, _ = v.(string)
+		value, ok := v.(string)
+		if op != "set" || !ok || strings.TrimSpace(value) == "" {
+			return fmt.Errorf("status requires nonempty set text")
 		}
+		e.Status = value
 	case "relationship":
-		if len(rest) == 0 || e.Relationship == nil {
+		if len(rest) != 1 || rest[0] == "" {
+			return fmt.Errorf("relationship target required")
+		}
+		if e.Relationship == nil {
 			e.Relationship = map[string]float64{}
 		}
-		if len(rest) > 0 {
+		if op == "del" {
+			delete(e.Relationship, rest[0])
+		} else {
 			f, ok := toFloat(v)
 			if !ok {
 				return fmt.Errorf("关系值需数值")
@@ -463,20 +556,44 @@ func setEntityField(e *Entity, field string, v any, op string, rest []string) er
 			e.Relationship[rest[0]] = f
 		}
 	case "extra":
+		if len(rest) != 1 || rest[0] == "" {
+			return fmt.Errorf("extra key required")
+		}
 		if e.Extra == nil {
 			e.Extra = map[string]any{}
 		}
-		if len(rest) > 0 {
+		if op == "del" {
+			delete(e.Extra, rest[0])
+		} else {
 			e.Extra[rest[0]] = v
 		}
 	case "stats":
+		if len(rest) != 1 || rest[0] == "" {
+			return fmt.Errorf("stat key required")
+		}
 		// 世界书驱动的动态属性集：属性名由世界书决定，引擎只做通用读写
 		if e.Stats == nil {
 			e.Stats = map[string]any{}
 		}
-		if len(rest) > 0 {
+		if op == "del" {
+			delete(e.Stats, rest[0])
+		} else {
 			e.Stats[rest[0]] = v
 		}
+	case "assets":
+		if len(rest) != 1 || rest[0] == "" {
+			return fmt.Errorf("asset key required")
+		}
+		if e.Assets == nil {
+			e.Assets = map[string]any{}
+		}
+		if op == "del" {
+			delete(e.Assets, rest[0])
+		} else {
+			e.Assets[rest[0]] = v
+		}
+	default:
+		return fmt.Errorf("unknown entity field: %s", field)
 	}
 	return nil
 }
@@ -496,6 +613,9 @@ func addEntityField(e *Entity, field string, v any, rest []string) error {
 		}
 		e.Health += f
 	case "relationship":
+		if len(rest) != 1 || rest[0] == "" {
+			return fmt.Errorf("relationship target required")
+		}
 		if e.Relationship == nil {
 			e.Relationship = map[string]float64{}
 		}
@@ -507,6 +627,9 @@ func addEntityField(e *Entity, field string, v any, rest []string) error {
 			e.Relationship[rest[0]] += f
 		}
 	case "stats":
+		if len(rest) != 1 || rest[0] == "" {
+			return fmt.Errorf("stat key required")
+		}
 		// 动态属性集：支持数值加减与整体设置
 		if e.Stats == nil {
 			e.Stats = map[string]any{}
@@ -523,6 +646,28 @@ func addEntityField(e *Entity, field string, v any, rest []string) error {
 			}
 			e.Stats[key] = cur + f
 		}
+	case "assets":
+		if len(rest) != 1 || rest[0] == "" {
+			return fmt.Errorf("asset key required")
+		}
+		if e.Assets == nil {
+			e.Assets = map[string]any{}
+		}
+		f, ok := toFloat(v)
+		if !ok {
+			return fmt.Errorf("asset delta must be numeric")
+		}
+		cur := float64(0)
+		if value, exists := e.Assets[rest[0]]; exists {
+			var ok bool
+			cur, ok = toFloat(value)
+			if !ok {
+				return fmt.Errorf("asset is not numeric")
+			}
+		}
+		e.Assets[rest[0]] = cur + f
+	default:
+		return fmt.Errorf("unsupported additive field: %s", field)
 	}
 	return nil
 }
@@ -532,6 +677,25 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 		return fmt.Errorf("world_level 路径过短")
 	}
 	switch rest[0] {
+	case "day":
+		day, ok := toFloat(c.Value)
+		if !ok || c.Op != "set" || day < float64(s.Day) || day != float64(int(day)) {
+			return fmt.Errorf("invalid world day")
+		}
+		s.Day = int(day)
+	case "protagonist", "narrative_pov":
+		name, ok := c.Value.(string)
+		if !ok || c.Op != "set" || strings.TrimSpace(name) == "" {
+			return fmt.Errorf("身份字段需非空角色名")
+		}
+		if _, ok := s.Entities[name]; !ok {
+			return fmt.Errorf("身份引用角色不存在: %s", name)
+		}
+		if rest[0] == "protagonist" {
+			s.WorldLevel.Protagonist = name
+		} else {
+			s.WorldLevel.NarrativePOV = name
+		}
 	case "tension":
 		f, ok := toFloat(c.Value)
 		if !ok {
@@ -539,14 +703,17 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 		}
 		s.WorldLevel.Tension = f
 	case "weather":
-		if c.Op == "set" {
-			s.Weather, _ = c.Value.(string)
+		v, ok := c.Value.(string)
+		if c.Op != "set" || !ok || strings.TrimSpace(v) == "" {
+			return fmt.Errorf("weather requires a nonempty string")
 		}
+		s.Weather = v
 	case "global_events":
-		if c.Op == "add" {
-			ev, _ := c.Value.(string)
-			s.WorldLevel.GlobalEvents = append(s.WorldLevel.GlobalEvents, ev)
+		ev, ok := c.Value.(string)
+		if c.Op != "add" || !ok || strings.TrimSpace(ev) == "" {
+			return fmt.Errorf("global event requires additive text")
 		}
+		s.WorldLevel.GlobalEvents = append(s.WorldLevel.GlobalEvents, ev)
 	case "background":
 		// world_level.background.{名}=一句话身份（背景人物池）；del 移除
 		if len(rest) < 2 {
@@ -557,8 +724,10 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 		}
 		if c.Op == "del" {
 			delete(s.WorldLevel.Background, rest[1])
-		} else if v, ok := c.Value.(string); ok {
+		} else if v, ok := c.Value.(string); ok && c.Op == "set" {
 			s.WorldLevel.Background[rest[1]] = v
+		} else {
+			return fmt.Errorf("background value requires set text")
 		}
 	case "locations":
 		// world_level.locations.{名}.{state|note|type}
@@ -573,6 +742,9 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 		if !ok {
 			loc = Location{Name: name, State: "正常"}
 		}
+		if len(rest) != 3 {
+			return fmt.Errorf("location path requires field")
+		}
 		if len(rest) >= 3 {
 			switch rest[2] {
 			case "state":
@@ -581,6 +753,10 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 				loc.Note, _ = c.Value.(string)
 			case "type":
 				loc.Type, _ = c.Value.(string)
+			case "senses":
+				loc.Senses, _ = c.Value.(string)
+			default:
+				return fmt.Errorf("unknown location field: %s", rest[2])
 			}
 		}
 		if loc.SinceDay == 0 {
@@ -596,6 +772,9 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 		if !ok {
 			fac = Faction{}
 		}
+		if len(rest) != 3 {
+			return fmt.Errorf("faction path requires field")
+		}
 		if len(rest) >= 3 {
 			switch rest[2] {
 			case "stance":
@@ -610,6 +789,8 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 					ev, _ := c.Value.(string)
 					fac.RecentActions = append(fac.RecentActions, ev)
 				}
+			default:
+				return fmt.Errorf("unknown faction field: %s", rest[2])
 			}
 		}
 		if s.WorldLevel.Factions == nil {
@@ -630,8 +811,14 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 					o.SetAt = v
 				}
 				s.WorldLevel.TensionOverride = o
+			} else {
+				return fmt.Errorf("tension override requires object")
 			}
+		} else {
+			return fmt.Errorf("tension override requires set")
 		}
+	default:
+		return fmt.Errorf("unknown world field: %s", rest[0])
 	}
 	return nil
 }

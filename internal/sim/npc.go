@@ -14,9 +14,11 @@ import (
 // ---------- NPC 互动（§5.1 场景状态机：Init → Act → GM裁决 → React） ----------
 
 type DialogueTurn struct {
-	Speaker string `json:"speaker"` // npc_某角色名 | 主角名
-	Speech  string `json:"speech"`
-	Mood    string `json:"mood,omitempty"`
+	Audience    []string `json:"audience,omitempty"`
+	SourceEvent string   `json:"source_event,omitempty"`
+	Speaker     string   `json:"speaker"` // npc_某角色名 | 主角名
+	Speech      string   `json:"speech"`
+	Mood        string   `json:"mood,omitempty"`
 }
 
 // NPCRespondLLM NPC 基于完整人设档案+记忆/场景自主发言（§7.5：NPC言行只能由自己产出）
@@ -37,7 +39,7 @@ func (s *Simulator) NPCRespond(ctx context.Context, npcName, npcMemory, scene st
 	user := fmt.Sprintf("你是%s。\n人格档案（言行必须符合，保持一致性）：\n%s\n\n你的记忆：\n%s\n\n当前场景：%s\n你看到主角（%s）来了。请自然地、按你的性格说一句话。",
 		npcName, profile, npcMemory, scene, s.heroName)
 
-	raw, err := s.llm.CompleteTier(ctx, "fast", system, user)
+	raw, err := s.llm.ForCharacter().CompleteTier(ctx, "fast", system, user)
 	if err != nil {
 		return DialogueTurn{}, err
 	}
@@ -61,11 +63,9 @@ func (s *Simulator) NPCRespond(ctx context.Context, npcName, npcMemory, scene st
 
 // HeroRespondLLM 主角在对话中的回应（简短自然，基于感知与性格；动态内容放user保持前缀稳定）
 func HeroRespondLLM(ctx context.Context, c *LLMClient, hero, heroProfile, npcSpeech string, wb *worldbook.Worldbook) (DialogueTurn, error) {
+	c = c.ForCharacter()
 	ctx = llm.WithSpan(ctx, "主角回应")
-	worldCtx := ""
-	if wb != nil {
-		worldCtx = wb.ForProtagonist(hero, heroProfile)
-	}
+	worldCtx := "你的身份与性格：" + heroProfile
 	system := `你是主角{hero}，一个活在这个世界里的真人。{world}
 
 规则：
@@ -101,41 +101,6 @@ func HeroRespondLLM(ctx context.Context, c *LLMClient, hero, heroProfile, npcSpe
 
 // ---------- 对话循环（§5.1：Init → NPC开口 → 主角回应 → NPC收尾，≤3轮） ----------
 
-// DialogueBatchLLM 一次调用生成完整三轮对话（NPC开口→主角回应→NPC收尾）
-// 替代原来的 3 次独立调用 → 每天省 2 次 LLM 调用（大幅提速，质量靠人格卡保持）
-func (s *Simulator) DialogueBatchLLM(ctx context.Context, npcName, npcMemory, heroProfile, scene string) ([]DialogueTurn, error) {
-	ctx = llm.WithSpan(ctx, "NPC批量对话")
-	// system 保持静态（不注入 npc/人设/主角），动态内容全部放 user → 前缀稳定，利于缓存
-	system := `你是对话导演，负责生成一场真实的日常相遇对话。规则：
-1. 输出严格 JSON 数组，恰好 3 段：
-[{"speaker":"NPC名","speech":"NPC开口的话（口语化，带习惯/口头禅，不超过50字）","mood":"情绪"},
-{"speaker":"主角名","speech":"主角回应（自然，符合性格，不超过40字）"},
-{"speaker":"NPC名","speech":"NPC收尾（呼应前文，可话里有话，不超过50字）"}]
-2. 言行符合各自人格（见用户消息里给出的人设）；NPC 不能全知（不知道的事不装知道，世界秘密不能说）；对话有生活气息、像真人聊天。
-3. 根据场景自然切入，别生硬，别喊名字式开场。`
-
-	profile := s.FormatSheetForPrompt(npcName)
-	user := fmt.Sprintf("NPC：%s\n人格档案（言行必须符合，保持一致性）：\n%s\n\n主角：%s，性格：%s\n\nNPC 记忆：\n%s\n\n当前场景：%s\n请按规则生成 3 段对话。",
-		npcName, profile, s.heroName, heroProfile, npcMemory, scene)
-	raw, err := s.llm.CompleteTier(ctx, "fast", system, user)
-	if err != nil {
-		return nil, err
-	}
-	jsonStr := llm.ExtractJSON(raw)
-	if jsonStr == "" {
-		return nil, fmt.Errorf("批量对话无JSON: %s", truncate(raw, 120))
-	}
-	var turns []DialogueTurn
-	if err := json.Unmarshal([]byte(jsonStr), &turns); err != nil {
-		return nil, fmt.Errorf("批量对话JSON解析失败: %v", err)
-	}
-	// 兜底：至少要有NPC开口和主角回应两段
-	if len(turns) >= 2 && turns[0].Speech != "" && turns[1].Speech != "" {
-		return turns[:3], nil
-	}
-	return nil, fmt.Errorf("批量对话轮次不足: %d", len(turns))
-}
-
 // RunDialogue 执行一段 NPC 互动对话，返回对话记录与关系值变化（走提案通道）
 func (s *Simulator) RunDialogue(ctx context.Context, ev EventCard) ([]DialogueTurn, *engine.Proposal, error) {
 	var turns []DialogueTurn
@@ -163,21 +128,20 @@ func (s *Simulator) RunDialogue(ctx context.Context, ev EventCard) ([]DialogueTu
 		}
 	}
 	if npcName == "" {
-		npcName = "熟人"
+		return nil, nil, fmt.Errorf("no identified participant")
+	}
+	if s.observeEvent(npcName, ev) == "" || s.observeEvent(s.heroName, ev) == "" {
+		return nil, nil, fmt.Errorf("dialogue requires local observations for both participants")
 	}
 	memory := s.npcMemory(npcName)
 
 	// 加速路径：一次调用生成完整三轮对话（省 2 次 LLM 调用）
-	if s.llm != nil {
-		if batch, err := s.DialogueBatchLLM(ctx, npcName, memory, s.heroProfile(), ev.Frame); err == nil {
-			turns = batch
-		}
-	}
+	// Speakers use independent requests; no shared private-memory dialogue prompt.
 	// 回退：逐段生成（批量失败时）
 	if len(turns) == 0 {
 		// Init：NPC 先开口（§5.1 规则1，注入完整人设档案）
 		if s.llm != nil {
-			t, err := s.NPCRespond(ctx, npcName, memory, ev.Frame, s.wb)
+			t, err := s.NPCRespond(ctx, npcName, memory, s.observeEvent(npcName, ev), s.wb)
 			if err == nil {
 				turns = append(turns, t)
 			}
@@ -204,7 +168,7 @@ func (s *Simulator) RunDialogue(ctx context.Context, ev EventCard) ([]DialogueTu
 		// NPC 收尾（视对话氛围决定是否继续；简化：NPC 补一句）
 		if len(turns) >= 2 && s.llm != nil {
 			last := turns[len(turns)-1].Speech
-			t, err := s.NPCRespond(ctx, npcName, memory+" 刚才主角回应："+last, ev.Frame, s.wb)
+			t, err := s.NPCRespond(ctx, npcName, memory+" 刚才主角回应："+last, s.observeEvent(npcName, ev), s.wb)
 			if err == nil {
 				turns = append(turns, t)
 			}
@@ -229,6 +193,9 @@ func (s *Simulator) RunDialogue(ctx context.Context, ev EventCard) ([]DialogueTu
 	prop.Changes = append(prop.Changes,
 		engine.Change{Path: "entities." + npcName + ".extra.last_seen_day", Op: "set", Value: s.day},
 	)
+	for i := range turns {
+		turns[i].Audience = []string{s.heroName, npcName}
+	}
 	return turns, prop, nil
 }
 

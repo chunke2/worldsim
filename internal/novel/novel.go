@@ -12,11 +12,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"worldsim/internal/config"
 	"worldsim/internal/engine"
 	"worldsim/internal/llm"
+	"worldsim/internal/narrative"
 	"worldsim/internal/sim"
 	"worldsim/internal/worldbook"
 )
@@ -24,29 +24,32 @@ import (
 // ---------- 章节计划 ----------
 
 type ChapterPlan struct {
-	Num      int    `json:"num"`
-	Title    string `json:"title"`
-	DayStart int    `json:"day_start"`
-	DayEnd   int    `json:"day_end"`
-	Days     []int  `json:"days"`
-	Status   string `json:"status"` // pending | done
-	Path     string `json:"path,omitempty"`
+	SourceDigest string `json:"source_digest,omitempty"`
+	Num          int    `json:"num"`
+	Title        string `json:"title"`
+	DayStart     int    `json:"day_start"`
+	DayEnd       int    `json:"day_end"`
+	Days         []int  `json:"days"`
+	Status       string `json:"status"` // pending | done
+	Path         string `json:"path,omitempty"`
 }
 
 // Writer 小说化写手（把模拟成果写成可阅读的小说）
 type Writer struct {
-	APICfg     *config.APIConfig
-	BookTitle  string
-	BookDir    string // storys/{书名}/chapters/
-	WB         *worldbook.Worldbook
-	DaysPerCh  int           // 每章包含的模拟天数（默认3）
-	ChapterLen string        // 章节字数档位：short(1500) | normal(2500) | long(4000)
-	Material   *MaterialBank // 描写素材库（真人大神示范，825条）
-	HeroName   string        // 主角名（写手必须用模拟主角名，不得自造）
+	NarrativeContext string // Author plan, never character knowledge.
+	APICfg           *config.APIConfig
+	BookTitle        string
+	BookDir          string // storys/{书名}/chapters/
+	WB               *worldbook.Worldbook
+	DaysPerCh        int           // 每章包含的模拟天数（默认3）
+	ChapterLen       string        // 章节字数档位：short(1500) | normal(2500) | long(4000)
+	Material         *MaterialBank // 描写素材库（真人大神示范，825条）
+	HeroName         string        // 主角名（写手必须用模拟主角名，不得自造）
 	// 跨章记忆（长文一致性：每章独立请求，靠注入"前情提要+伏笔"防遗忘/防断头）
 	PrevSummary string // 前面所有章节的一句话摘要（累积，最近优先）
 	Foreshadows string // 未回收伏笔清单（模拟层伏笔账本，写手可推进/回收）
 	Decisions   string // 本章涉及剧情岔口与已定方向（用户改选优先，否则 AI 代决；写手必须照此方向写）
+	WorldRefs   string // 用户上传的世界参考资料；属于硬设定，小说规划与正文都必须读取
 }
 
 // NewWriter 创建小说化写手
@@ -72,6 +75,9 @@ func (w *Writer) SetHeroName(name string) {
 		w.HeroName = name
 	}
 }
+
+// SetWorldRefs 同步当前世界的附件聚合文本。附件中的明确事实优先于通用写作建议。
+func (w *Writer) SetWorldRefs(refs string) { w.WorldRefs = strings.TrimSpace(refs) }
 
 // SetMaterialDir 覆盖素材库目录（供外部指定）
 func (w *Writer) SetMaterialDir(dir string) { w.Material = LoadMaterialBank(dir) }
@@ -369,12 +375,19 @@ func daysInRange(days []int, lo, hi int) []int {
 
 // worldContext 世界设定摘要（供分章/叙事规划注入）
 func (w *Writer) worldContext() string {
+	var parts []string
 	if w.WB != nil {
-		if c := w.WB.ForNovelist(); c != "" {
-			return c
+		if c := strings.TrimSpace(w.WB.ForNovelist()); c != "" {
+			parts = append(parts, c)
 		}
 	}
-	return "（无世界书）"
+	if refs := strings.TrimSpace(w.WorldRefs); refs != "" {
+		parts = append(parts, "【用户提供的世界参考资料（硬约束；人物、规则、时间线不得擅自改写）】\n"+refs)
+	}
+	if len(parts) == 0 {
+		return "（无世界设定）"
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // pickChapterTitle 从该章天数范围内的事件条目选标题
@@ -433,22 +446,17 @@ func (w *Writer) planChapterNarrative(ctx context.Context, p ChapterPlan, materi
 		return ""
 	}
 
-	worldCtx := ""
-	if w.WB != nil {
-		worldCtx = w.WB.ForNovelist()
-	}
+	worldCtx := w.worldContext()
 
-	system := `你是网文小说的"叙事规划师"。你的任务不是写正文，而是拿到模拟世界的编年史素材后，规划"这一章怎么讲"——把日志变成剧本大纲。
+	system := `你是小说叙事规划师。你的任务不是写正文，而是把模拟世界的编年史整理成忠于事实的章节计划。
 输出严格 JSON，格式：
-{"opening_hook":"开场用什么场景/悬念砸脸（具体到画面和动作，禁止'氛围铺垫'开场）","middle_develop":"中段怎么展开：哪些事件写成完整场景（写足）、哪些事件压缩成一句过渡、事件之间怎么衔接","closing_hook":"结尾留什么具体悬念（具体到谁/什么/在哪，禁止'他感觉有大事要发生'）","pov_note":"视角决策：主角本章知道什么/不知道什么/他以为的真相和实际的差距","payoff_type":"本章爽点类型（打脸/收获/装逼/情感/无——如果本章不该给爽点就填'无'）","pacing":"节奏（fast=快节奏冲突推进/slow=蓄力铺垫/mixed=张弛交替）","word_budget":"字数策略：哪些段写足（高潮/冲突/爽点）、哪些段省略（过渡/背景）、预估本章该长该短"}
+{"opening_hook":"从哪一个已有动作或问题开场","middle_develop":"已有事件如何按因果展开，哪些写成场景，哪些概括","climax":"本章已有事实中变化最大的时刻；没有则写无","closing_hook":"停在哪个尚未解决的已有问题；没有则自然收束","pov_note":"主角已经知道、尚不知道和只能推测的内容","payoff_type":"无|发现|关系变化|决策结果","pacing":"fast|slow|mixed","word_budget":"按素材密度分配篇幅"}
 规则：
-1. 素材是"原料"，你是"厨师"——决定怎么切、怎么炒、怎么摆盘。平淡的日子不用硬写，戏剧性的场景要放大。
-2. 开场必须直接进冲突/异常/悬念，禁止天气/环境开场。
-3. 收尾必须留具体钩子，让读者想看下一章。
-4. 视角严格限知：主角不知道的绝对不能写。
-5. 爽点要按节奏来——不是每章都要给爽点，憋着的章节要标注"蓄力"，释放的章节标注"爆发"。
-6. 如果素材里有打脸/收获/装逼/情感的机会，标注出来让写手写足。
-7. 只输出 JSON，不要其他文字。`
+1. 用户参考资料和世界书是硬约束，编年史是已经发生的事实，不得改写。
+2. 不得新增人物、物品、规则、历史关系、危险或反转。
+3. 视角严格限知；主角不知道的内容不能作为事实写入计划。
+4. 开场和结尾都只能从已有素材中选择。素材不足时允许自然收束。
+5. 只输出 JSON，不要其他文字。`
 
 	user := fmt.Sprintf("章节信息：第%d章（模拟第%d~%d天）\n\n世界设定：\n%s\n\n", p.Num, p.DayStart, p.DayEnd, worldCtx)
 	if w.PrevSummary != "" {
@@ -457,7 +465,7 @@ func (w *Writer) planChapterNarrative(ctx context.Context, p ChapterPlan, materi
 	if w.Foreshadows != "" {
 		user += "未回收伏笔：\n" + w.Foreshadows + "\n\n"
 	}
-	user += "本章素材（编年史剪辑）：\n" + material + "\n\n请规划这一章怎么讲。"
+	user += w.NarrativeContext + "\n本章素材（需按类型区分事实/表达/观察/候选）：\n" + material + "\n\n请规划这一章怎么讲。"
 
 	raw, err := llm.CallAPITierSync(ctx, w.APICfg, "fast", system, user)
 	if err != nil {
@@ -489,106 +497,57 @@ func (w *Writer) planChapterNarrative(ctx context.Context, p ChapterPlan, materi
 
 // WriteChapter 生成一章小说正文（LLM），保存到 chapters/NNN_标题.md，返回正文
 func (w *Writer) WriteChapter(ctx context.Context, p ChapterPlan, chronicle []sim.ChronicleEntry, thinkings map[int]string, entities map[string]engine.Entity) (string, error) {
+	if w.APICfg == nil || w.HeroName == "" {
+		return "", fmt.Errorf("写作配置或叙事视角缺失")
+	}
+	w.LoadSummariesBefore(p.Num)
+	if err := w.CheckContinuityBefore(p.Num); err != nil {
+		return "", err
+	}
+	authorPlan, err := narrative.Load(filepath.Dir(w.BookDir))
+	if err != nil {
+		return "", err
+	}
+	w.NarrativeContext = authorPlan.WriterContext(p.Num)
 	ctx = llm.WithSpan(ctx, "小说写手")
-	material := w.buildChapterMaterial(p, chronicle, thinkings)
+	material := w.buildChapterMaterial(p, chronicle, nil) // reasoning is not a character's established knowledge
 	// 两段式管线第①段：叙事规划层——先规划"这一章怎么讲"，再让写手按大纲写
 	narrativePlan := w.planChapterNarrative(ctx, p, material)
 	// 小说化用设定：A1世界观 + B4伏笔清单 + C文风（世界书静态，利于前缀缓存）
-	worldCtx := ""
-	if w.WB != nil {
-		worldCtx = w.WB.ForNovelist()
-	}
+	worldCtx := w.worldContext()
 	// 动态内容（角色现状随实体状态变化）单独放 user，保证 system 前缀字节级稳定 → 缓存命中
-	dynamicCtx := ""
-	if w.HeroName != "" {
-		dynamicCtx = "主角：" + w.HeroName + "（" + w.characterIntro(entities) + "）"
-	}
+	dynamicCtx := w.characterIntro(entities)
 
 	lengthRule := "2200~3200 字"
-	minLen := 2000
 	switch w.ChapterLen {
 	case "short":
 		lengthRule = "1400~1800 字"
-		minLen = 1200
 	case "long":
 		lengthRule = "3500~4500 字"
-		minLen = 3200
 	}
 
 	// 小说写手用更大的 token 预算（长文），clone 配置避免影响其他调用
-	cfg := *w.APICfg
-	if cfg.MaxTokens < 8192 {
-		cfg.MaxTokens = 8192
-	}
+	cfg := w.APICfg.NovelConfig()
 
-	system := `你是` + w.BookTitle + `的小说作家。
-直接写小说正文，第一行是"第N章·标题"，然后正文。不要输出任何分析、复述、解释，正文必须是纯小说。正文结束后另起一行写【本章摘要】+100字左右剧情概括（供下一章作者衔接，不属于正文）。
+	system := `你是` + w.BookTitle + `的小说作者。把世界模拟留下的事实写成自然、清楚、可读的小说章节。
 
-文风与题材基调（必须严格遵守，来自世界书设定）：
+【设定与事实】
 ` + worldCtx + `
 
-网文节奏铁律（这是网文，不是散文，读者要看得爽）：
-1. 每章必须有【实打实的进展】：主角做出选择 / 遭遇冲突 / 得到关键线索 / 关系升温或破裂 / 能力或身份变化——至少一件，别整章只写氛围。
-2. 开头直接进场景或冲突：第一段就要有画面或钩子，禁止用大段天气/环境铺垫开场（"雾很大""天很黑"不超过一句）。
-3. 对话要有交锋和个性：角色说话带性格（毒舌的呛人、温柔的话软、沉默的惜字如金），别一问一答干巴巴；一句话能带出信息量。
-4. 主角要主动：他思考、判断、行动、反击，别全程被动接收怪事；他的每一次选择都要推动事情变化。
-5. 情绪要有起伏：紧张、好奇、警惕、一丝暖意、一点爽——别从头平到尾。
-6. 结尾悬念要具体：新威胁出现 / 秘密露出一角 / 主角面临抉择 / 伏笔被推进——禁止用"雾还在涨"这种空泛结尾。
-
-去AI味铁律（真人编辑方法论，违反=本章不合格）：
-1. **AI高频词禁用**：突然/猛然/顿时/缓缓/微微/轻轻/默默/静静/似乎/然而/然后/非常/十分/仿佛/终于——这些词每出现1次，用具体动作或口语替代（"缓缓抬头"→"抬头，动作慢得像是脖子生了锈"；"突然"→"猛地/冷不丁/说时迟那时快"）。本章出现超过5次判为AI味超标。
-2. **每场景≥4种感官**：视觉必有（含反常细节）+听觉+触觉+嗅觉，关键场景加"第六感"（后脖颈发凉/胃里翻涌/汗毛竖起）。感官是信息不是装饰。
-3. **限制性视角三不**：不描写主角不知道的（别人的内心/远处的事）、不解释主角没验证的、不预设读者能理解的。视角一乱，代入感崩塌。
-4. **对话要有毛刺**：人不把话说全——插话、打岔、欲言又止、答非所问、口头禅；禁止一问一答教科书式对白；对话要带性格和潜台词。
-5. **留白与混沌**：每章至少留1个"不解释"的细节（真实生活里很多事就是没道理）；允许角色偶尔做出"不符合人设"的举动（人是复杂的）；情绪要混着来（开心时一丝怅然，愤怒时一丝无力），别单线平铺。
-6. **人味公式**：人味 = 独特性×混沌感×情绪毛刺 ÷（完美度+工整度+正确度）。写得太工整太"正确"的地方，主动制造一点偏差。
-
-网文段落形态铁律（网文 = 短段落 + 动词推进 + 高信息密度）：
-1. 段落要短：每段最多 2~3 行，动作、对话、反应**各自独立成段**；一句话能说完的绝不用两句。
-2. 动词优先：多用"推门、攥紧、蹲下、抬头、转身"这类动作动词推进画面，少用形容词堆叠（"惨白的灯光""昏黄的雾"这类修饰每章限用）。
-3. 环境信息化：环境描写不超过全章 1/10，且必须带信息或异常感（"灯管闪了两下"→ 暗示异常），禁止纯风景抒情段落。
-4. 砍掉 80% 铺垫：场景切换直接"切"，不用过渡句铺垫；背景信息在对话和动作里带出来，禁止大段背景介绍。
-5. 对话占比要高：每章对话至少占 40% 篇幅，对话就是情节（带出信息、推进冲突、暴露性格）。
-
-章节骨架（每章按这个四拍走）：
-· 第1拍【钩子开场】1~2 段：冲突/异常/悬念直接砸脸，主角立刻处于"有事发生"的状态。
-· 第2拍【推进交锋】主角为解决问题主动行动，遭遇阻碍，与 NPC 对话交锋，信息逐层揭开。
-· 第3拍【小高潮/爽点】主角有收获：发现关键线索 / 反杀 / 能力或局面升级 / 打脸 / 关系突破——让读者爽一下。
-· 第4拍【新钩子收尾】结尾一句具体悬念：某样东西出现 / 某人说出惊人的话 / 主角发现自己在局中——具体到"谁/什么/在哪"，禁止"他感觉有大事要发生"。
-
-叙事方法对照（照这个改，别用左边的写法）：
-❌ 散文腔："那时候沈默还没学会怎么应答这种问题。他只是摸了一下鼻子，含糊地'嗯'了一声。"
-✅ 网文腔："沈默没接话，摸了下鼻子，'嗯'了一声，转身就走。"
-❌ 散文腔："命运这东西从来不提前打招呼。"
-✅ 网文腔：删掉，直接写下一个动作/对话——让读者自己感受。
-❌ 散文腔："雾天的江边没什么人。沈默沿着江堤走，脚边青石缝里积着露水，他本来没打算停下来，直到余光扫见那叠东西。"
-✅ 网文腔："江边没人。沈默走了两步，脚下一顿——石缝里搁着四五封信，湿了大半。"
-7. 爽点意识（世界书题材决定爽点形态）：底层翻身、能力觉醒的爽、打脸反转、危机解除——有合适机会就给读者一个爽点。
-
- 写作纪律：
-1. 只写主角` + w.HeroName + `亲眼所见、亲耳所闻、心中所想（限知视角）。绝不写他不知道的事——别人的过去、世界的秘密、任何"里层真相"，主角不知道就不许写。
-2. 素材必须全部转化为叙事，禁止照搬条目：
-·【经历】里的"事件"→ 场景描写（五感、环境、氛围）
-·【对话】→ 引号对话，带说话人的动作和神态
-·【内心】→ 心理活动（"他想着……"或直接内心独白）
-3. 章节字数必须达到 ` + lengthRule + `，**未达标视为不合格**。分段自然，对话单独成段。用足素材，把关键素材写成完整场景，场景与场景之间用时间流转衔接。
-
-戏剧化改编权（你是导演，不是记录员）：
-· 素材是"原料"，不是"剧本"——你有权压缩、合并、强化、改编：平淡的日子一句带过或直接跳过，戏剧性场景（冲突/对峙/发现/升级）写足放大。
-· 主角主动性：素材里主角如果只是"被怪事找上门"，你要主动给他安排行动——他去查、他去问、他做选择，让读者看到他在推动故事。
-· 能力成长：按 A7 能力体系给本章的能力状态定位，素材里能力相关的现象要写成能力在运作（感知到什么、有什么用、代价是什么），该升级的章节写出升级时刻。
-· 反派存在感：按 A8 反派行动线，每 2~3 章安排反派动一次，主角要有应对，压迫→对抗→打脸要有完整的爽点闭环。
-· 强化爽点：发现关键线索、反杀、打脸、能力升级、关系突破——这些时刻宁可写足不要一笔带过（读者等的就是这些）。
-4. 输出纯小说文本：开头一行写"第N章·标题"（用章号），正文分段。禁止 JSON、禁止"本章完"之外的解说，禁止使用 markdown 标题符号。
-5. 正文结束后，**另起一行**写摘要块，格式严格为：【本章摘要】+100字左右的剧情概括（本章人物状态变化/关键事件/伏笔推进/留下的悬念，供下一章作者衔接，**不属于正文，不要写进故事里**）。
-6. 详略铁律（§9.9 叙事时间控制）：
-   · 【场景素材】→ 完整场景，写足戏剧张力
-   · 【背景素材】→ 章首一句过渡带过（"这段时间，日子照旧，但有些东西在变"），**严禁展开成完整场景**
-   · 没有任何事发生的时段 → **直接跳过**，不要为凑字数写流水账
-   · 宁可章节稍短，也不要注水；平淡章写短，高潮章写足` + sim.WritingCraftSkills()
+【写作规则】
+1. 事实优先级：用户参考资料与世界书硬规则 > 编年史和角色状态 > 叙事规划 > 文学表达。低优先级内容不得改写高优先级事实。
+2. 只能使用设定或模拟材料中已经存在的有名角色、地点、物品、规则和历史。不得为了制造悬念而增加第六个人、新钥匙、超自然现象、隐藏组织或旧识关系。
+3. 采用第三人称限知，固定跟随主角` + w.HeroName + `。只写主角能够观察、听见、回忆或合理推断的内容；推断必须呈现为推断。
+4. 编年史是事实记录。可以调整叙述顺序、补足动作和场景衔接，但不能改变事件结果、人物选择、规则条件和因果关系。材料不足时宁可写短，不得凭空增加事件凑字数。
+5. 使用自然、准确的现代汉语。优先具体动作和清楚句意；比喻仅在准确且必要时使用。不要强制堆叠感官、金句、冷僻词、碎句或反常表达。
+6. 对话数量由场景需要决定。每个人的表达应符合其已知性格、目标和信息范围，不用对话解释作者设定。
+7. 章节需要有明确的场景目标、变化和结束点。悬念只能来自已有事实中尚未解决的问题。
+8. 目标篇幅为` + lengthRule + `；事实密度不足时允许低于目标。
+9. 第一行严格写“第N章·标题”，随后只写正文。末尾另起一行写“【本章摘要】”，用约100字记录本章事实、人物状态变化和未解决问题。不要输出分析、创作说明或 Markdown 标题。`
 
 	// 动态内容全部放进 user 消息（system 保持静态 → DeepSeek 前缀缓存命中，降本）
 	var ub strings.Builder
+	ub.WriteString(w.NarrativeContext + "\n")
 	if dynamicCtx != "" {
 		ub.WriteString("【世界设定与角色现状（作为写作依据，沿用其身份与状态）】\n" + dynamicCtx + "\n\n")
 	}
@@ -602,81 +561,17 @@ func (w *Writer) WriteChapter(ctx context.Context, p ChapterPlan, chronicle []si
 		ub.WriteString("\n【未回收伏笔（前文埋下的钩子，本章自然推进或回收，别忘掉）】\n" + w.Foreshadows + "\n")
 	}
 	if w.Decisions != "" {
-		ub.WriteString("\n【本章剧情方向（已定，写手必须严格执行：主角按“采用方向”行动，不得另起炉灶或跳过）】\n" + w.Decisions + "\n")
-	}
-	if w.Material != nil {
-		if ref := w.Material.PickFor(material, 3, 8); ref != "" {
-			ub.WriteString("\n【段落形态示范（学节奏/对话/动作推进，禁止抄袭）】\n" + ref + "\n")
-		}
+		ub.WriteString("\n【角色曾考虑的选择（仅是意向，结果必须由已提交事件证明，不得将事后改选写成既成事实）】\n" + w.Decisions + "\n")
 	}
 	ub.WriteString(strings.TrimSpace(material))
-	ub.WriteString("\n\n【最后指令】现在直接写第" + fmt.Sprintf("%d", p.Num) + "章正文。第一行写'第" + fmt.Sprintf("%d", p.Num) + "章·标题'——标题必须是你起的网文章节名（要有悬念/冲突/画面感，2~8个字，禁止用素材条目名如'街坊议论：xx'）。然后写正文，正文结束另起一行写【本章摘要】。")
+	ub.WriteString("\n\n【最后指令】现在直接写第" + fmt.Sprintf("%d", p.Num) + "章正文。第一行写'第" + fmt.Sprintf("%d", p.Num) + "章·标题'。正文最后完整结束一个场景，另起一行写【本章结束】，再写【本章摘要】和事实摘要。")
 	user := ub.String()
 
-	res, err := llm.CallAPITierSyncResult(ctx, &cfg, "premium", system, user)
+	res, err := llm.CallAPITierSyncResult(ctx, cfg, "", system, user)
 	if err != nil {
 		return "", fmt.Errorf("章节生成失败: %w", err)
 	}
-	text := strings.TrimSpace(res.Content)
-	reasoning := strings.TrimSpace(res.ReasoningContent) // 模型自带思考通道（若有），正文之外另存
-	text = strings.TrimPrefix(text, "```")
-	text = strings.TrimSuffix(text, "```")
-	text = strings.TrimSpace(text)
-
-	// 字数校验：不足则自动续写补齐（用当前正文继续写，直到达标）
-	curLen := utf8.RuneCountInString(text)
-	if curLen < minLen {
-		contPrompt := `继续写这个章节（这是上一部分，接着写下去，不要重复已有内容）。
-要求：接着写后续场景（可以是第二天/新的遭遇/更多对话与内心），把章节补足到总字数 ` + lengthRule + `。保持同样的文风和视角，结尾留悬念。
-已写内容（前面部分，不要重复）：
-` + truncateRunes(text, 2000)
-		cont, err2 := llm.CallAPITierSync(ctx, &cfg, "premium", system, contPrompt)
-		if err2 == nil {
-			cont = strings.TrimSpace(cont)
-			cont = strings.TrimPrefix(cont, "```")
-			cont = strings.TrimSuffix(cont, "```")
-			if utf8.RuneCountInString(cont) > 100 {
-				text = text + "\n\n" + cont
-			}
-		}
-	}
-
-	// 从正文提取标题（第一行"第N章·XXX"），用于文件名
-	fileTitle := p.Title
-	if idx := strings.Index(text, "\n"); idx > 0 {
-		first := strings.TrimSpace(text[:idx])
-		first = strings.TrimPrefix(first, "#")
-		first = strings.TrimSpace(first)
-		if dot := strings.Index(first, "·"); dot >= 0 && dot+1 < len(first) {
-			fileTitle = strings.TrimSpace(first[dot+1:])
-		}
-	}
-
-	fname := fmt.Sprintf("%03d_%s.md", p.Num, sanitize(fileTitle))
-	path := filepath.Join(w.BookDir, "chapters", fname)
-	os.MkdirAll(filepath.Dir(path), 0755) // 兜底：目录被删时重建
-	// 正文与摘要分离（AI 返回：正文 + 【本章摘要】；思考走 reasoning_content 通道自动另存）
-	notes, body, summary := splitSummary(text)
-	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
-		return "", fmt.Errorf("章节保存失败: %w", err)
-	}
-	// 创作思路：优先用模型自带思考通道（reasoning_content），兜底用 content 里【创作思路】块
-	if notes == "" {
-		notes = reasoning
-	}
-	if notes != "" {
-		w.saveNotes(p, notes)
-	}
-	// 摘要持久化（summary.jsonl）+ 累积前情提要（下一章注入）
-	if summary != "" {
-		w.saveSummary(p, summary)
-	} else {
-		// 兜底：AI 没写摘要块时，取正文首句（尽力而为）
-		if i := strings.Index(body, "\n"); i > 0 {
-			w.saveSummary(p, strings.TrimSpace(body[:i]))
-		}
-	}
-	return body, nil
+	return w.publish(p, res, chronicle)
 }
 
 // splitSummary 把 AI 输出拆成（创作思路, 正文, 摘要）
@@ -705,32 +600,6 @@ func splitSummary(text string) (notes, body, summary string) {
 	return "", body, summary
 }
 
-// saveNotes 创作思路存盘（notes.jsonl，AI构思过程，不属于正文）
-func (w *Writer) saveNotes(p ChapterPlan, notes string) {
-	notesPath := filepath.Join(w.BookDir, "notes.jsonl")
-	os.MkdirAll(w.BookDir, 0755)
-	line := fmt.Sprintf(`{"num":%d,"title":%s,"notes":%s}`, p.Num, jsonQuote(p.Title), jsonQuote(notes))
-	f, err := os.OpenFile(notesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		f.WriteString(line + "\n")
-		f.Close()
-	}
-}
-
-// saveSummary 摘要持久化到 summary.jsonl + 更新前情提要（保留最近8章）
-func (w *Writer) saveSummary(p ChapterPlan, summary string) {
-	sumPath := filepath.Join(w.BookDir, "summary.jsonl")
-	os.MkdirAll(w.BookDir, 0755)
-	line := fmt.Sprintf(`{"num":%d,"title":%s,"summary":%s}`, p.Num, jsonQuote(p.Title), jsonQuote(summary))
-	f, err := os.OpenFile(sumPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		f.WriteString(line + "\n")
-		f.Close()
-	}
-	// 更新内存前情提要
-	w.updatePrevSummary(p.Num, p.Title, summary)
-}
-
 // updatePrevSummary 累积前情提要（每章一行，保留最近8章）
 func (w *Writer) updatePrevSummary(num int, title, summary string) {
 	sum := fmt.Sprintf("第%d章《%s》：%s", num, title, truncateRunes(summary, 120))
@@ -743,36 +612,6 @@ func (w *Writer) updatePrevSummary(num int, title, summary string) {
 	if len(lines) > 8 {
 		w.PrevSummary = strings.Join(lines[len(lines)-8:], "\n")
 	}
-}
-
-// LoadSummaries 从 summary.jsonl 恢复前情提要（重启/重新生成小说时用，实现跨章记忆断点）
-func (w *Writer) LoadSummaries() {
-	sumPath := filepath.Join(w.BookDir, "summary.jsonl")
-	data, err := os.ReadFile(sumPath)
-	if err != nil {
-		return
-	}
-	w.PrevSummary = ""
-	for _, ln := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		ln = strings.TrimSpace(ln)
-		if ln == "" {
-			continue
-		}
-		var s struct {
-			Num     int    `json:"num"`
-			Title   string `json:"title"`
-			Summary string `json:"summary"`
-		}
-		if json.Unmarshal([]byte(ln), &s) == nil && s.Summary != "" {
-			w.updatePrevSummary(s.Num, s.Title, s.Summary)
-		}
-	}
-}
-
-// jsonQuote 简单 JSON 字符串转义（标题/摘要含引号时）
-func jsonQuote(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
 }
 
 func truncateRunes(s string, n int) string {
@@ -800,6 +639,9 @@ func (w *Writer) buildChapterMaterial(p ChapterPlan, chronicle []sim.ChronicleEn
 	tagCount := map[string]int{}
 	for _, e := range chronicle {
 		if daySet[e.Day] {
+			if !w.EligibleMaterial(e) {
+				continue
+			}
 			dayEntries[e.Day] = append(dayEntries[e.Day], e)
 			for _, t := range e.Tags {
 				tagCount[t]++
@@ -829,7 +671,7 @@ func (w *Writer) buildChapterMaterial(p ChapterPlan, chronicle []sim.ChronicleEn
 		entries := dayEntries[d]
 		var dayKey, dayBg []string
 		for _, e := range entries {
-			line := "· " + e.Content
+			line := "· [" + e.Kind + " / " + strings.Join(e.SourceEvents, ",") + "] " + e.Content
 			// 场景：SAID 对话 / 高权重（事件/铺垫/伏笔/关系/揭示/里程碑）
 			if e.Kind == "SAID" || e.Weight >= 0.55 {
 				dayKey = append(dayKey, line)
@@ -898,15 +740,25 @@ func topTags(tagCount map[string]int, n int) []string {
 // characterIntro 生成角色简介（供写手参考）
 func (w *Writer) characterIntro(entities map[string]engine.Entity) string {
 	var sb strings.Builder
-	sb.WriteString(w.HeroName + "：本地讨生活的普通人，日子过得紧巴但心气还在。")
-	if ent, ok := entities[w.HeroName]; ok {
+	if w.HeroName != "" {
+		sb.WriteString(w.HeroName + "：主视角人物。")
+	}
+	if ent, ok := entities[w.HeroName]; ok && w.HeroName != "" {
 		if j, ok := ent.Extra["profile"].(string); ok && j != "" {
 			sb.Reset()
 			sb.WriteString(w.HeroName + "：" + j + "。")
 		}
 	}
 	// 其他角色：从实体取 job/profile（任何世界通用，不写死角色名）
-	for name, ent := range entities {
+	names := make([]string, 0, len(entities))
+	for name := range entities {
+		if strings.TrimSpace(name) != "" && name != w.HeroName {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ent := entities[name]
 		if name == w.HeroName {
 			continue
 		}
@@ -919,6 +771,9 @@ func (w *Writer) characterIntro(entities map[string]engine.Entity) string {
 		} else if j != "" {
 			sb.WriteString(fmt.Sprintf("%s：%s。", name, j))
 		}
+	}
+	if sb.Len() == 0 {
+		return "（当前没有可用的角色状态；禁止自行创造有名角色）"
 	}
 	return sb.String()
 }

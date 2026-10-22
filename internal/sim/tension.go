@@ -120,8 +120,9 @@ func (s *Simulator) runSkip(ctx context.Context, res *DayResult) (*DayResult, er
 	}
 	s.day += advanceDays - 1
 	// 世界侧照常演化：天气/张力微调
-	s.engine.State().Day = s.day
-	s.engine.State().WorldLevel.Tension += 0.05 // 快进期间世界仍暗中演进
+	if err := s.commitClock(ctx, s.day); err != nil {
+		return nil, err
+	}
 
 	// 编年史摘要块（§9.9.4：必须交代变化）
 	s.chronicle = append(s.chronicle, ChronicleEntry{

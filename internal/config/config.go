@@ -22,6 +22,80 @@ type APIConfig struct {
 	// 用途：推理模型会把 max_tokens 大量消耗在思考通道上，长 JSON 输出（素材规划/大纲/章节等）
 	// 常见 finish_reason=length 且正文为空；关掉思考通道可显著提速并避免空正文。
 	ExtraBody map[string]any `json:"extra_body,omitempty"`
+	// Novel overrides affect prose generation only, never character decisions.
+	Novel *GenerationConfig `json:"novel,omitempty"`
+}
+
+type GenerationConfig struct {
+	Model              string         `json:"model,omitempty"`
+	MaxTokens          int            `json:"max_tokens,omitempty"`
+	HTTPTimeoutSeconds int            `json:"http_timeout_seconds,omitempty"`
+	ExtraBody          map[string]any `json:"extra_body,omitempty"`
+}
+
+func SaveAPIConfig(c *APIConfig, path string) error {
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(path, b)
+}
+
+// MergeAPIConfig preserves omitted fields. Explicit zero/null values clear fields.
+func MergeAPIConfig(base *APIConfig, patch []byte) (*APIConfig, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(patch, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, fmt.Errorf("API 配置必须是 JSON 对象")
+	}
+	var out APIConfig
+	if base != nil {
+		b, err := json.Marshal(base)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(b, &out); err != nil {
+			return nil, err
+		}
+	}
+	if err := json.Unmarshal(patch, &out); err != nil {
+		return nil, err
+	}
+	if out.MaxTokens < 0 || out.HTTPTimeoutSeconds < 0 {
+		return nil, fmt.Errorf("token 和超时不能为负数")
+	}
+	if out.Novel != nil && (out.Novel.MaxTokens < 0 || out.Novel.HTTPTimeoutSeconds < 0) {
+		return nil, fmt.Errorf("小说生成 token 和超时不能为负数")
+	}
+	return &out, nil
+}
+
+func (c *APIConfig) NovelConfig() *APIConfig {
+	if c == nil {
+		return nil
+	}
+	out, _ := MergeAPIConfig(c, []byte(`{}`))
+	out.Model = c.TierModel("premium")
+	if c.Novel != nil {
+		if c.Novel.Model != "" {
+			out.Model = c.Novel.Model
+		}
+		if c.Novel.MaxTokens > 0 {
+			out.MaxTokens = c.Novel.MaxTokens
+		}
+		if c.Novel.HTTPTimeoutSeconds > 0 {
+			out.HTTPTimeoutSeconds = c.Novel.HTTPTimeoutSeconds
+		}
+		if c.Novel.ExtraBody != nil {
+			out.ExtraBody = c.Novel.ExtraBody
+		}
+	}
+	if out.MaxTokens == 0 {
+		out.MaxTokens = 16384
+	}
+	return out
 }
 
 // TierModel 返回指定档位的模型名；未配置该档位则回退 Model

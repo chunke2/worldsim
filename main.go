@@ -229,6 +229,8 @@ func startWorldServer(worldDir string, apiCfg *config.APIConfig, ra *research.Ag
 	mux.HandleFunc("POST /api/world/decisions/{id}", ws.handleDecisionResolve)
 	mux.HandleFunc("GET /api/world/readiness", ws.handleReadiness)
 	mux.HandleFunc("GET /api/world/token_stats", ws.handleTokenStats)
+	mux.HandleFunc("GET /api/world/narrative", ws.handleNarrativeGet)
+	mux.HandleFunc("PUT /api/world/narrative", ws.handleNarrativePut)
 	mux.HandleFunc("POST /api/world/novel/generate", ws.handleNovelGenerate)
 	mux.HandleFunc("GET /api/world/novel", ws.handleNovelList)
 	mux.HandleFunc("GET /api/world/novel/chapter/{num}", ws.handleNovelChapter)
@@ -361,12 +363,13 @@ func startWorldServer(worldDir string, apiCfg *config.APIConfig, ra *research.Ag
 
 // 多世界：worldServer 持有世界实例池
 type worldServer struct {
-	baseDir  string // worlds/
-	worlds   map[string]*worldInstance
-	current  string // 当前世界名
-	apiCfg   *config.APIConfig
-	research *research.Agent // 题材研究智能体（热门题材研究/主题规划/世界书方向产出）
-	novelMu  sync.Mutex      // 小说生成防重入锁（并发请求会写重复章号）
+	baseDir     string // worlds/
+	worlds      map[string]*worldInstance
+	current     string // 当前世界名
+	apiCfg      *config.APIConfig
+	research    *research.Agent // 题材研究智能体（热门题材研究/主题规划/世界书方向产出）
+	novelMu     sync.Mutex      // 小说生成防重入锁（并发请求会写重复章号）
+	narrativeMu sync.Mutex      // author plan update and simulation guard boundary
 
 	artManager *art.Manager // 美术工坊任务管理器（全局一个，懒加载）
 	artOnce    sync.Once
@@ -768,12 +771,9 @@ func (ws *worldServer) newInstance(name string) *worldInstance {
 	// 初始化附件存储，否则上传接口会把 nil store 误报成“没有可用世界”。
 	w.attach = attach.NewStore(filepath.Join(dir, "attachments"))
 
-	// 加载世界书（worlds/../worldbooks/ 池）
+	// 加载世界书：优先全局池中的同名文件，其次世界目录内文件。
+	// 不再回退到某个具体题材，避免现实密室世界被“都市怪谈”等无关设定污染。
 	wbPath := filepath.Join(ws.baseDir, "..", "worldbooks", name+".md")
-	if _, err := os.Stat(wbPath); err != nil {
-		// 兜底：默认世界书
-		wbPath = filepath.Join(ws.baseDir, "..", "worldbooks", "临江市·都市怪谈.md")
-	}
 	if wb, err := worldbook.Load(wbPath); err == nil {
 		w.wb = wb
 	} else {
@@ -806,6 +806,7 @@ func (ws *worldServer) newInstance(name string) *worldInstance {
 	// 小说化写手（放世界自己的目录：worlds/{世界名}/novel/——世界的一切产物内聚，最好找）
 	bookDir := filepath.Join(w.dir, "novel")
 	w.novelW = novel.NewWriter(ws.apiCfg, name+"·小说", bookDir, w.wb, w.heroName)
+	w.novelW.SetWorldRefs(w.attachRefs())
 	// 自动启用 LLM（api.json 配置有效时）——重启/新建世界不用再手动配置
 	ws.autoEnableLLM(w)
 	return w
@@ -839,12 +840,7 @@ func (ws *worldServer) autoEnableLLM(w *worldInstance) {
 	if ws.apiCfg == nil || ws.apiCfg.BaseURL == "" || ws.apiCfg.Model == "" {
 		return
 	}
-	w.llm = &sim.LLMClient{Cfg: &config.APIConfig{
-		BaseURL:    ws.apiCfg.BaseURL,
-		Model:      ws.apiCfg.Model,
-		APIKey:     ws.apiCfg.APIKey,
-		ModelTiers: ws.apiCfg.ModelTiers,
-	}, WorldRefs: w.attachRefs()}
+	w.llm = &sim.LLMClient{Cfg: ws.apiCfg, WorldRefs: w.attachRefs()}
 	w.applyLLM()
 }
 
@@ -858,11 +854,17 @@ func (w *worldInstance) attachRefs() string {
 
 // refreshWorldRefs 上传/删除附件后刷新 LLM 客户端的世界参考资料（同一指针，立即生效）。
 func (ws *worldServer) refreshWorldRefs(w *worldInstance) {
-	if w == nil || w.llm == nil {
+	if w == nil {
 		return
 	}
-	w.llm.WorldRefs = w.attachRefs()
-	fmt.Printf(" [附件] 世界参考资料已刷新（%d 字）\n", len(w.llm.WorldRefs))
+	refs := w.attachRefs()
+	if w.llm != nil {
+		w.llm.WorldRefs = refs
+	}
+	if w.novelW != nil {
+		w.novelW.SetWorldRefs(refs)
+	}
+	fmt.Printf(" [附件] 世界参考资料已刷新（%d 字）\n", len(refs))
 }
 
 // POST /api/world/attach/upload — 上传世界参考资料附件（multipart 字段 file）
@@ -1247,6 +1249,12 @@ func (ws *worldServer) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var lastErr error
+	if len(proposals) > 0 {
+		last := &proposals[len(proposals)-1]
+		last.Changes = append(last.Changes,
+			engine.Change{Path: "world_level.protagonist", Op: "set", Value: hero},
+			engine.Change{Path: "world_level.narrative_pov", Op: "set", Value: hero})
+	}
 	// 独立 context：客户端断开（宿主 http_request 超时）不影响初始化提交
 	submitCtx, submitCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer submitCancel()
@@ -1434,6 +1442,11 @@ func (ws *worldServer) handleSetLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		ws.writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
 	var req struct {
 		Mode       string            `json:"mode"` // mock | real | off
 		BaseURL    string            `json:"base_url"`
@@ -1441,7 +1454,7 @@ func (ws *worldServer) handleSetLLM(w http.ResponseWriter, r *http.Request) {
 		APIKey     string            `json:"api_key"`
 		ModelTiers map[string]string `json:"model_tiers"` // 模型分层：fast/normal/premium
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		ws.writeJSON(w, 400, map[string]string{"error": "请求解析失败: " + err.Error()})
 		return
 	}
@@ -1460,20 +1473,36 @@ func (ws *worldServer) handleSetLLM(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(tiers) == 0 {
 			tiers = map[string]string{
-				"fast":    "deepseek-v4-flash-0731",
+				"fast":    "deepseek-flash",
 				"normal":  "deepseek-v4-pro",
 				"premium": "deepseek-v4-pro",
 			}
 		}
-		inst.llm = &sim.LLMClient{Cfg: &config.APIConfig{
-			BaseURL:    req.BaseURL,
-			Model:      req.Model,
-			APIKey:     req.APIKey,
-			ModelTiers: tiers,
-		}}
-		// 持久化到 api.json（重启后小说/模拟分层不丢）
-		if b, err := json.MarshalIndent(inst.llm.Cfg, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(ws.baseDir, "..", "api.json"), b, 0644)
+		cfgPath := filepath.Join(ws.baseDir, "..", "api.json")
+		base, err := config.LoadAPIConfig(cfgPath)
+		if err != nil {
+			ws.writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		merged, err := config.MergeAPIConfig(base, raw)
+		if err != nil {
+			ws.writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if len(merged.ModelTiers) == 0 {
+			merged.ModelTiers = tiers
+		}
+		if err := config.SaveAPIConfig(merged, cfgPath); err != nil {
+			ws.writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		inst.llm = &sim.LLMClient{Cfg: merged, WorldRefs: inst.attachRefs()}
+		// 前端保存的是全局 API 配置。模拟 Agent 与小说写手必须立即共享同一份
+		// 新配置，否则模拟会使用新 Key，而创建世界时生成的 Writer 仍持有旧 Key。
+		ws.apiCfg = inst.llm.Cfg
+		inst.apiCfg = ws.apiCfg
+		if inst.novelW != nil {
+			inst.novelW.APICfg = ws.apiCfg
 		}
 	case "off":
 		inst.llm = nil
@@ -1844,7 +1873,10 @@ func mustRead(p string) []byte {
 // POST /api/world/novel/generate — 把已模拟天数写成小说章节（逐章 LLM 生成）
 // body: {"days_per_chapter":3,"chapter_len":"normal","all":false}
 func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Request) {
-	ws.novelMu.Lock() // 防并发重复生成（同一时间只允许一个生成任务）
+	if !ws.novelMu.TryLock() {
+		ws.writeJSON(w, 409, map[string]any{"ok": false, "error": "小说生成正在运行"})
+		return
+	}
 	defer ws.novelMu.Unlock()
 	inst := ws.inst()
 	if inst == nil {
@@ -1856,13 +1888,25 @@ func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Reques
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "模拟器未初始化"})
 		return
 	}
+	_, pov, identityErr := engine.ResolveIdentity(inst.engine.State())
+	if identityErr != nil {
+		ws.writeJSON(w, 409, map[string]any{"ok": false, "error": identityErr.Error()})
+		return
+	}
+	inst.novelW.SetHeroName(pov)
+	latestCfg, cfgErr := config.LoadAPIConfig(filepath.Join(ws.baseDir, "..", "api.json"))
+	if cfgErr != nil {
+		ws.writeJSON(w, 500, map[string]any{"ok": false, "error": cfgErr.Error()})
+		return
+	}
+	inst.novelW.APICfg = latestCfg
 	// 跨章记忆注入：未回收伏笔清单（模拟层账本→写手）+ 加载已有章节摘要（断点续写不丢记忆）
 	inst.novelW.Foreshadows = inst.sim.OpenForeshadows()
-	inst.novelW.LoadSummaries()
 	var req struct {
 		DaysPerChapter int    `json:"days_per_chapter"`
 		ChapterLen     string `json:"chapter_len"`
 		All            bool   `json:"all"`
+		Force          bool   `json:"force"` // 调试用途；正常流程应等待模拟就绪
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.DaysPerChapter > 0 {
@@ -1871,24 +1915,33 @@ func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Reques
 	if req.ChapterLen != "" {
 		inst.novelW.ChapterLen = req.ChapterLen
 	}
+	if !req.Force {
+		readiness := inst.sim.Readiness()
+		if ready, _ := readiness["ready"].(bool); !ready {
+			ws.writeJSON(w, 409, map[string]any{
+				"ok":        false,
+				"error":     "模拟素材尚未达到小说化条件，请继续运行世界；达到就绪后再生成。",
+				"readiness": readiness,
+			})
+			return
+		}
+	}
 
 	chronicle := inst.sim.Chronicle()
-	thinkings := inst.sim.Thinkings()
 	if len(chronicle) == 0 {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "编年史为空，先跑几天模拟（POST /api/world/sim/day）"})
 		return
 	}
 
-	plans := inst.novelW.PlanChapters(r.Context(), chronicle, thinkings)
+	plans, planErr := inst.novelW.EnsurePlans(r.Context(), chronicle)
+	if planErr != nil {
+		ws.writeJSON(w, 500, map[string]any{"ok": false, "error": planErr.Error()})
+		return
+	}
 	if len(plans) == 0 {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "没有可写的章节"})
 		return
 	}
-	// 生成前清空旧章节（防上一轮残留/重复章号）
-	chDir := filepath.Join(inst.novelW.BookDir, "chapters")
-	os.RemoveAll(chDir)
-	os.MkdirAll(chDir, 0755)
-
 	// 统计已生成章节（按文件存在性）
 	written := map[int]bool{}
 	chaptersDir := filepath.Join(inst.novelW.BookDir, "chapters")
@@ -1919,7 +1972,7 @@ func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Reques
 		if inst.sim != nil {
 			inst.novelW.Decisions = sim.FormatDirections(inst.sim.DecisionsFor(p.DayStart, p.DayEnd))
 		}
-		if _, err := inst.novelW.WriteChapter(ctx, *p, chronicle, thinkings, entities); err != nil {
+		if _, err := inst.novelW.WriteChapter(ctx, *p, chronicle, nil, entities); err != nil {
 			ws.writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error(), "chapter": p.Num})
 			return
 		}
@@ -2004,8 +2057,11 @@ func (ws *worldServer) handleNovelList(w http.ResponseWriter, r *http.Request) {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "模拟器未初始化"})
 		return
 	}
-	chronicle := inst.sim.Chronicle()
-	plans := inst.novelW.PlanChapters(r.Context(), chronicle, inst.sim.Thinkings())
+	plans, err := inst.novelW.ReadPlans()
+	if err != nil {
+		ws.writeJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	if plans == nil {
 		plans = []novel.ChapterPlan{}
 	}
@@ -2018,6 +2074,16 @@ func (ws *worldServer) handleNovelList(w http.ResponseWriter, r *http.Request) {
 				var n int
 				if _, err := fmt.Sscanf(name[:3], "%d", &n); err == nil {
 					written[n] = true
+					found := false
+					for _, p := range plans {
+						if p.Num == n {
+							found = true
+							break
+						}
+					}
+					if !found {
+						plans = append(plans, novel.ChapterPlan{Num: n, Title: strings.TrimSuffix(name, ".md"), Status: "legacy"})
+					}
 				}
 			}
 		}
@@ -2027,11 +2093,11 @@ func (ws *worldServer) handleNovelList(w http.ResponseWriter, r *http.Request) {
 			plans[i].Status = "done"
 		}
 	}
-	exports, _ := inst.novelW.ExportBook()
+	exports, _ := filepath.Glob(filepath.Join(inst.novelW.BookDir, "*.txt"))
 	if exports == nil {
 		exports = []string{}
 	}
-	ws.writeJSON(w, 200, map[string]any{"book": "临江异闻录", "plans": plans, "exports": exports})
+	ws.writeJSON(w, 200, map[string]any{"book": inst.novelW.BookTitle, "plans": plans, "exports": exports})
 }
 
 // GET /api/world/novel/chapter/{num} — 读取章节正文

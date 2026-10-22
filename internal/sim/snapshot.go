@@ -33,6 +33,8 @@ var snapshotFiles = []string{
 	"agents_memory.json",
 	"decisions.jsonl",
 	"token_stats.json",
+	"narrative.json",
+	"narrative_progress.json",
 }
 
 func (s *Simulator) snapshotsDir() string {

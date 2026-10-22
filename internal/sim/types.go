@@ -15,26 +15,29 @@ import (
 // ---------- 事件卡（§3.2/§7） ----------
 
 type EventCard struct {
-	ID                string         `json:"id"` // ev-{day}-{n}
-	Day               int            `json:"day"`
-	Type              string         `json:"type"` // daily | conflict | wonder | romance | opportunity | crisis
-	Title             string         `json:"title"`
-	Location          string         `json:"location"`
-	Severity          float64        `json:"severity"` // 0~1，决定是否暂停（≥0.75）
-	NPCs              []string       `json:"npcs,omitempty"`
-	Frame             string         `json:"frame"`       // 遭遇框架（含时序占位，不含NPC具体言行）
-	FirstActor        string         `json:"first_actor"` // 谁先行动（时序占位）
-	Options           []string       `json:"options,omitempty"`
-	NewChars          []NewCharacter `json:"new_characters,omitempty"`     // 本事件引入的新角色（自然产生）
-	RelEffect         string         `json:"rel_effect,omitempty"`         // 感情/关系事件说明（如"与苏婉共度危机，关系升温"）
-	Foreshadow        string         `json:"foreshadow,omitempty"`         // 本事件埋/推进的伏笔名（伏笔账本）
-	ResolveForeshadow string         `json:"resolve_foreshadow,omitempty"` // 本事件正式揭晓/结算的伏笔名（与未回收清单同名，收坑）
-	NextEvents        []EventCard    `json:"next_events,omitempty"`        // 遭遇链：本事件触发的后续事件（1-3天后出现）
+	ObservationSources map[string]string `json:"observation_sources,omitempty"`
+	Observations       map[string]string `json:"observations,omitempty"` // Per-recipient sensory payload; Frame is author-only.
+	ID                 string            `json:"id"`                     // ev-{day}-{n}
+	Day                int               `json:"day"`
+	Type               string            `json:"type"` // daily | conflict | wonder | romance | opportunity | crisis
+	Title              string            `json:"title"`
+	Location           string            `json:"location"`
+	Severity           float64           `json:"severity"` // 0~1，决定是否暂停（≥0.75）
+	NPCs               []string          `json:"npcs,omitempty"`
+	Frame              string            `json:"frame"`       // 遭遇框架（含时序占位，不含NPC具体言行）
+	FirstActor         string            `json:"first_actor"` // 谁先行动（时序占位）
+	Options            []string          `json:"options,omitempty"`
+	NewChars           []NewCharacter    `json:"new_characters,omitempty"`     // 本事件引入的新角色（自然产生）
+	RelEffect          string            `json:"rel_effect,omitempty"`         // 感情/关系事件说明（如"与苏婉共度危机，关系升温"）
+	Foreshadow         string            `json:"foreshadow,omitempty"`         // 本事件埋/推进的伏笔名（伏笔账本）
+	ResolveForeshadow  string            `json:"resolve_foreshadow,omitempty"` // 本事件正式揭晓/结算的伏笔名（与未回收清单同名，收坑）
+	NextEvents         []EventCard       `json:"next_events,omitempty"`        // 遭遇链：本事件触发的后续事件（1-3天后出现）
 }
 
 // ---------- Observation Packet（§4.4） ----------
 
 type Observation struct {
+	SourceEvent   string  `json:"source_event,omitempty"`
 	ID            string  `json:"id"`
 	Source        string  `json:"source"` // 亲眼|听说|媒体|短信|推断
 	Content       string  `json:"content"`
@@ -58,15 +61,17 @@ type ObservationPacket struct {
 // Weight=戏剧权重（0~1）：写手按此选材——≥0.55进场景，0.3~0.55进背景压缩，<0.3 一句话带过
 // Tags=角色/地点/伏笔/冲突标记（供"本章焦点"统计主线）
 type ChronicleEntry struct {
-	Day         int      `json:"day"`
-	Kind        string   `json:"kind"` // FACT | SAID | STATE
-	Time        string   `json:"time"`
-	Content     string   `json:"content"`
-	Visibility  string   `json:"visibility"` // public | restricted
-	Source      string   `json:"source,omitempty"`
-	Credibility float64  `json:"credibility,omitempty"`
-	Weight      float64  `json:"weight,omitempty"` // 戏剧权重（旧数据无此字段=0，加载时按规则补默认）
-	Tags        []string `json:"tags,omitempty"`   // 角色/地点/伏笔/冲突标记
+	SourceEvents []string `json:"source_events,omitempty"`
+	Audience     []string `json:"audience,omitempty"`
+	Day          int      `json:"day"`
+	Kind         string   `json:"kind"` // FACT | SAID | STATE
+	Time         string   `json:"time"`
+	Content      string   `json:"content"`
+	Visibility   string   `json:"visibility"` // public | restricted
+	Source       string   `json:"source,omitempty"`
+	Credibility  float64  `json:"credibility,omitempty"`
+	Weight       float64  `json:"weight,omitempty"` // 戏剧权重（旧数据无此字段=0，加载时按规则补默认）
+	Tags         []string `json:"tags,omitempty"`   // 角色/地点/伏笔/冲突标记
 }
 
 // ---------- Agent 接口 ----------

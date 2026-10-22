@@ -18,12 +18,14 @@ import (
 
 // MemoryEntry 单条记忆（Smallville 范式：时间戳 + 重要性分数）
 type MemoryEntry struct {
-	Day        int     `json:"day"`
-	Time       string  `json:"time"`
-	Actor      string  `json:"actor"`      // 谁的记忆
-	Content    string  `json:"content"`    // 记忆内容（已转述为本人视角）
-	Kind       string  `json:"kind"`       // event | dialogue | state | reflection | plan
-	Importance float64 `json:"importance"` // 0~1
+	SourceEvents []string `json:"source_events,omitempty"`
+	Credibility  float64  `json:"credibility,omitempty"`
+	Day          int      `json:"day"`
+	Time         string   `json:"time"`
+	Actor        string   `json:"actor"`      // 谁的记忆
+	Content      string   `json:"content"`    // 记忆内容（已转述为本人视角）
+	Kind         string   `json:"kind"`       // event | dialogue | state | reflection | plan
+	Importance   float64  `json:"importance"` // 0~1
 }
 
 // MemoryStore 全角色记忆库（每个角色独立记忆流，互不串通）
@@ -67,7 +69,32 @@ func NewMemoryStore(path string) *MemoryStore {
 }
 
 // SetCompressor 设置记忆压缩用的 LLM（月度摘要）
-func (ms *MemoryStore) SetCompressor(c *LLMClient) { ms.llm = c }
+func (ms *MemoryStore) SetCompressor(c *LLMClient) { ms.llm = c.ForCharacter() }
+
+func (ms *MemoryStore) AddObservation(actor string, o Observation) {
+	if actor == "" || o.VisibleTo != actor || o.SourceEvent == "" || !o.WritableToMem {
+		return
+	}
+	ms.AddDay(actor, o.Content, "observation", o.Credibility, o.ArrivalDay)
+	entries := ms.memories[actor]
+	if len(entries) > 0 {
+		entries[len(entries)-1].SourceEvents = []string{o.SourceEvent}
+		entries[len(entries)-1].Credibility = o.Credibility
+	}
+}
+
+func (ms *MemoryStore) attachLatestSource(actor, source string, credibility float64) {
+	if ms == nil || source == "" {
+		return
+	}
+	entries := ms.memories[actor]
+	if len(entries) == 0 {
+		return
+	}
+	entries[len(entries)-1].SourceEvents = []string{source}
+	entries[len(entries)-1].Credibility = credibility
+	ms.memories[actor] = entries
+}
 
 // Save 持久化全部记忆
 func (ms *MemoryStore) Save() {
@@ -329,6 +356,7 @@ func (ms *MemoryStore) Actors() []string {
 
 // Reflect 周期性反思（Smallville 范式）：回顾记忆流，LLM 提炼高阶洞察，写回记忆
 func (ms *MemoryStore) Reflect(ctx context.Context, c *LLMClient, actor string) string {
+	c = c.ForCharacter()
 	ctx = llm.WithSpan(ctx, "记忆反思")
 	entries := ms.Recent(actor, 30)
 	if len(entries) < 5 {
@@ -369,6 +397,16 @@ func (ms *MemoryStore) Reflect(ctx context.Context, c *LLMClient, actor string) 
 // BatchConsolidate 批量记忆巩固：一次 LLM 调用整理多个角色的旧记忆，再分发到各自 Archive
 // 省 token：n 个角色只需 1 次调用（原来 CapMemory 每人 1 次）。触发条件同 CapMemory：超过 maxN 条才巩固
 func (ms *MemoryStore) BatchConsolidate(ctx context.Context, c *LLMClient, actors []string, maxN int) map[string]int {
+	if len(actors) > 1 {
+		out := map[string]int{}
+		for _, actor := range actors {
+			for k, v := range ms.BatchConsolidate(ctx, c, []string{actor}, maxN) {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	c = c.ForCharacter()
 	ctx = llm.WithSpan(ctx, "记忆巩固")
 	consolidated := map[string]int{}
 	if ms == nil || c == nil || len(actors) == 0 {
@@ -442,6 +480,16 @@ func (ms *MemoryStore) BatchConsolidate(ctx context.Context, c *LLMClient, actor
 
 // BatchReflect 批量反思：一次 LLM 调用产出多个角色的高阶认知，写回各自记忆（省 token）
 func (ms *MemoryStore) BatchReflect(ctx context.Context, c *LLMClient, actors []string) map[string]string {
+	if len(actors) > 1 {
+		out := map[string]string{}
+		for _, actor := range actors {
+			for k, v := range ms.BatchReflect(ctx, c, []string{actor}) {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	c = c.ForCharacter()
 	ctx = llm.WithSpan(ctx, "记忆反思")
 	out := map[string]string{}
 	if ms == nil || c == nil || len(actors) == 0 {
@@ -584,6 +632,7 @@ func (ms *MemoryStore) CapMemory(ctx context.Context, c *LLMClient, actor string
 
 // MonthlyConsolidate 睡眠巩固：每月把该角色记忆合并成月度摘要（TiMEM/openclaw 理念）
 func (ms *MemoryStore) MonthlyConsolidate(ctx context.Context, c *LLMClient, actor string, currentDay int) {
+	c = c.ForCharacter()
 	if ms == nil || c == nil {
 		return
 	}

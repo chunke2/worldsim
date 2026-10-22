@@ -70,20 +70,7 @@ func (s *Simulator) LastThinking() string { return s.lastThinking }
 func (s *Simulator) Thinkings() map[int]string { return s.thinkings }
 
 func NewSimulator(se *engine.StateEngine, worldDir string) *Simulator {
-	hero := ""
-	// 主角识别：优先找 extra.role=="protagonist" 的实体（初始化时打了标记）
-	for name, e := range se.State().Entities {
-		if role, ok := e.Extra["role"].(string); ok && role == "protagonist" {
-			hero = name
-			break
-		}
-	}
-	if hero == "" { // fallback：第一个实体（不应发生，防御）
-		for name := range se.State().Entities {
-			hero = name
-			break
-		}
-	}
+	hero, _, _ := engine.ResolveIdentity(se.State())
 	s := &Simulator{
 		engine:    se,
 		worldDir:  worldDir,
@@ -302,8 +289,17 @@ func (s *Simulator) nextCmd(actor string) string {
 }
 
 // RunDay 执行一天（Scene 全模拟 / Summary 轻模拟 / Skip 快进，§5.1/§5.2）
-func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
+func (s *Simulator) runDay(ctx context.Context) (*DayResult, error) {
+	hero, _, err := engine.ResolveIdentity(s.engine.State())
+	if err != nil {
+		return nil, err
+	}
+	s.heroName = hero
 	s.day++
+	if err := s.commitClock(ctx, s.day); err != nil {
+		s.day--
+		return nil, err
+	}
 	res := &DayResult{Day: s.day, Mode: s.mode}
 
 	// ---------- 0. 张力引擎：自适应粒度决策（§5：auto 模式） ----------
@@ -489,7 +485,9 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 				s.day += skipDays - 1
 			}
 		}
-		s.engine.State().Day = s.day
+		if err := s.commitClock(ctx, s.day); err != nil {
+			return nil, err
+		}
 		if err := s.engine.Save(filepath.Join(s.worldDir, "world_state.json")); err != nil {
 			return nil, fmt.Errorf("保存世界状态失败: %w", err)
 		}
@@ -582,7 +580,7 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 		regProp := engine.Proposal{
 			CommandID: s.nextCmd("cast"), ActorID: "world_agent",
 			BaseRevision: s.engine.State().Revision, Type: "state_change",
-			Changes: regChanges, Reason: "新角色登场（世界演化）",
+			Changes: regChanges, Reason: "新角色登场（世界演化）", SourceEvents: eventEvidenceIDs(s.events),
 		}
 		if err := s.engine.Submit(ctx, &regProp); err == nil {
 			res.Proposals = append(res.Proposals, regProp)
@@ -596,6 +594,11 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 				}
 			}
 		}
+	}
+	// First commit each character's local observation. Later state changes cite
+	// these immutable journal IDs instead of provisional generator IDs.
+	if err := s.commitObservations(ctx); err != nil {
+		return nil, err
 	}
 	// 事件关系影响（romance/crisis/conflict → 双向关系变化）
 	var relChanges []engine.Change
@@ -615,7 +618,7 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 		relProp := engine.Proposal{
 			CommandID: s.nextCmd("rel"), ActorID: "world_agent",
 			BaseRevision: s.engine.State().Revision, Type: "state_change",
-			Changes: relChanges, Reason: "事件关系演化",
+			Changes: relChanges, Reason: "事件关系演化", SourceEvents: eventEvidenceIDs(s.events),
 		}
 		if err := s.engine.Submit(ctx, &relProp); err == nil {
 			res.Proposals = append(res.Proposals, relProp)
@@ -640,6 +643,7 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 		BaseRevision: s.engine.State().Revision,
 		Type:         "state_change",
 		Reason:       fmt.Sprintf("Day %d 世界推进", s.day),
+		SourceEvents: eventEvidenceIDs(s.events),
 	}
 	var action *engine.Proposal
 	if s.llm != nil {
@@ -709,6 +713,8 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 		action.ActorID = "protagonist"
 		action.BaseRevision = s.engine.State().Revision
 		action.Type = "state_change"
+		// A character action may only cite events that this character observed.
+		action.SourceEvents = actorEventEvidence(s.heroName, s.events)
 		if err := s.engine.Submit(ctx, action); err != nil {
 			// 提案被硬约束/GM拒绝：记录为"行动受阻"，不中断循环
 			res.Chronicle = append(res.Chronicle, ChronicleEntry{
@@ -726,6 +732,7 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 						CommandID: s.nextCmd("impact"), ActorID: "world_agent",
 						BaseRevision: s.engine.State().Revision, Type: "state_change",
 						Changes: impactChanges, Reason: "主角行动的世界影响" + impact,
+						SourceEvents: append([]string(nil), action.SourceEvents...),
 					}
 					if err := s.engine.Submit(ctx, &impProp); err == nil {
 						res.Proposals = append(res.Proposals, impProp)
@@ -755,6 +762,26 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 	for _, ev := range s.events {
 		if len(ev.NPCs) > 0 || strings.HasPrefix(ev.FirstActor, "npc_") {
 			turns, prop, err := s.RunDialogue(ctx, ev)
+			// 对话写入编年史（SAID：命题真假待定，可信度 0.6）
+			var dialogueSources []string
+			for i := range turns {
+				t := &turns[i]
+				sourceID, err := s.commitEvidence(ctx, "utterance", t.Speaker, t.Speech, ev.Location, t.Audience)
+				if err != nil {
+					return nil, err
+				}
+				t.SourceEvent = sourceID
+				dialogueSources = append(dialogueSources, sourceID)
+				s.chronicle = append(s.chronicle, ChronicleEntry{
+					SourceEvents: []string{sourceID}, Audience: t.Audience,
+					Day: s.day, Kind: "SAID", Time: now(),
+					Content:     fmt.Sprintf("%s说：%s", t.Speaker, t.Speech),
+					Visibility:  "restricted",
+					Source:      "对话",
+					Credibility: 0.6,
+
+					Weight: 0.6, Tags: []string{"对话", t.Speaker}})
+			}
 			if err == nil && prop != nil {
 				prop.CommandID = s.nextCmd("npc")
 				// RunDialogue 内部已按 ev.NPCs/FirstActor 解析出实际 NPC；这里兼容 NPCs 为空但 FirstActor 直指 npc_xxx 的场景，避免越界。
@@ -767,20 +794,10 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 				prop.ActorID = actor
 				prop.BaseRevision = s.engine.State().Revision
 				prop.Type = "state_change"
+				prop.SourceEvents = dialogueSources
 				if err := s.engine.Submit(ctx, prop); err == nil {
 					res.Proposals = append(res.Proposals, *prop)
 				}
-			}
-			// 对话写入编年史（SAID：命题真假待定，可信度 0.6）
-			for _, t := range turns {
-				s.chronicle = append(s.chronicle, ChronicleEntry{
-					Day: s.day, Kind: "SAID", Time: now(),
-					Content:     fmt.Sprintf("%s说：%s", t.Speaker, t.Speech),
-					Visibility:  "public",
-					Source:      "对话",
-					Credibility: 0.6,
-
-					Weight: 0.6, Tags: []string{"对话", t.Speaker}})
 			}
 			dialogue = append(dialogue, turns...)
 			break // MVP：每天最多一段对话
@@ -803,7 +820,9 @@ func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
 	}
 
 	// 状态保存（先同步 day 再落盘，避免滞后）
-	s.engine.State().Day = s.day
+	if err := s.commitClock(ctx, s.day); err != nil {
+		return nil, err
+	}
 	if err := s.engine.Save(filepath.Join(s.worldDir, "world_state.json")); err != nil {
 		return nil, fmt.Errorf("保存世界状态失败: %w", err)
 	}
@@ -866,21 +885,7 @@ func (s *Simulator) recordMemories(res *DayResult) {
 	if s.mem == nil {
 		return
 	}
-	// ① 事件：主角记 + 事件涉及的 NPC 也记（各自视角）
-	// 龙套（walkon）不占记忆：只记主角视角的"遇到"，不给龙套建独立记忆
-	for _, ev := range res.Events {
-		imp := 0.3 + ev.Severity*0.7
-		s.mem.AddDay(s.heroName, fmt.Sprintf("第%d天：%s（%s）", ev.Day, ev.Title, ev.Frame), "event", imp, ev.Day)
-		for _, npc := range ev.NPCs {
-			if npc == "" || npc == s.heroName {
-				continue
-			}
-			if s.isWalkon(npc) {
-				continue // 龙套不建独立记忆
-			}
-			s.mem.AddDay(npc, fmt.Sprintf("第%d天：我卷进了这件事——%s", ev.Day, ev.Title), "event", imp*0.9, ev.Day)
-		}
-	}
+	// Observations were already recorded per recipient with committed source IDs.
 	// ② 对话：双方记忆（说话人记自己的话，其他在场者记听到了什么）
 	participants := []string{s.heroName}
 	for _, t := range res.Dialogue {
@@ -902,16 +907,18 @@ func (s *Simulator) recordMemories(res *DayResult) {
 		}
 		imp := 0.5
 		s.mem.AddDay(t.Speaker, fmt.Sprintf("第%d天：我对在场的人说：%s", res.Day, t.Speech), "dialogue", imp, res.Day)
-		for _, p := range uniq {
+		s.mem.attachLatestSource(t.Speaker, t.SourceEvent, 1)
+		for _, p := range t.Audience {
 			if p != t.Speaker {
 				s.mem.AddDay(p, fmt.Sprintf("第%d天：%s对我说：%s", res.Day, t.Speaker, t.Speech), "dialogue", imp*0.8, res.Day)
+				s.mem.attachLatestSource(p, t.SourceEvent, 0.9)
 			}
 		}
 	}
 	// ③ 状态变化 → 涉及者记忆（谁的状态变了给谁记）
 	for _, p := range res.Proposals {
 		for _, c := range p.Changes {
-			if strings.Contains(c.Path, s.heroName) {
+			if strings.HasPrefix(c.Path, "entities."+s.heroName+".") {
 				s.mem.AddDay(s.heroName, fmt.Sprintf("第%d天：状态变化 %s %s %v", res.Day, c.Path, c.Op, c.Value), "state", 0.4, res.Day)
 			}
 		}
@@ -1032,55 +1039,57 @@ func (s *Simulator) generateEvent() *EventCard {
 		npcName = "熟人"
 	}
 	ev := &EventCard{
-		ID:         fmt.Sprintf("ev-%03d-%d", s.day, len(s.events)+1),
-		Day:        s.day,
-		Type:       tpl.Type,
-		Title:      tpl.Title,
-		Location:   loc,
-		Severity:   tpl.Severity,
-		Frame:      fmt.Sprintf(tpl.FrameFmt, loc, npcName),
-		FirstActor: "npc_" + npcName,
-		Options:    tpl.Options,
+		ID:           fmt.Sprintf("ev-%03d-%d", s.day, len(s.events)+1),
+		Day:          s.day,
+		Type:         tpl.Type,
+		Title:        tpl.Title,
+		Location:     loc,
+		Severity:     tpl.Severity,
+		Frame:        fmt.Sprintf(tpl.FrameFmt, loc, npcName),
+		FirstActor:   "npc_" + npcName,
+		Options:      tpl.Options,
+		Observations: map[string]string{s.heroName: fmt.Sprintf(tpl.FrameFmt, loc, npcName)},
+	}
+	if npcName != "熟人" {
+		ev.Observations[npcName] = fmt.Sprintf("我在%s遇见了%s。", loc, s.heroName)
 	}
 	if tpl.Type == "slice" || tpl.Type == "wonder" {
 		ev.FirstActor = "protagonist"
 		ev.NPCs = nil
 	} else {
-		ev.NPCs = []string{npcName}
+		if npcName == "熟人" {
+			ev.FirstActor = "protagonist"
+			ev.NPCs = nil
+		} else {
+			ev.NPCs = []string{npcName}
+		}
 	}
 	return ev
 }
 
 // ---------- 3. 感知分发（§4.4） ----------
 
+// observeEvent never forwards an omniscient Frame or invents remote hearsay.
+func (s *Simulator) observeEvent(actor string, ev EventCard) string {
+	ent, ok := s.engine.State().Entities[actor]
+	if !ok || actor == "" || ev.Location == "" || ent.Location != ev.Location {
+		return ""
+	}
+	return strings.TrimSpace(ev.Observations[actor])
+}
+
 func (s *Simulator) buildObservation(events []EventCard) ObservationPacket {
-	pkt := ObservationPacket{Recipient: "protagonist", Day: s.day}
+	pkt := ObservationPacket{Recipient: s.heroName, Day: s.day}
 	for _, ev := range events {
-		// 亲眼：主角所在位置的事件
-		if ev.Location == s.engine.State().Entities[s.heroName].Location || ev.Severity >= 0.5 {
-			pkt.Observations = append(pkt.Observations, Observation{
-				ID:            fmt.Sprintf("obs-%03d-%d", s.day, len(pkt.Observations)+1),
-				Source:        "亲眼",
-				Content:       ev.Frame,
-				VisibleTo:     "在场者",
-				LocationScope: ev.Location,
-				Credibility:   0.95,
-				ArrivalDay:    s.day,
-				WritableToMem: true,
-			})
-		} else {
-			// 听说/媒体：传播范围裁剪
-			pkt.Observations = append(pkt.Observations, Observation{
-				ID:            fmt.Sprintf("obs-%03d-%d", s.day, len(pkt.Observations)+1),
-				Source:        "听说",
-				Content:       "街坊议论：" + ev.Title,
-				VisibleTo:     "本地居民",
-				LocationScope: ev.Location,
-				Credibility:   0.5,
-				ArrivalDay:    s.day,
-				WritableToMem: true,
-			})
+		content := s.observeEvent(s.heroName, ev)
+		if content == "" {
+			continue
 		}
+		pkt.Observations = append(pkt.Observations, Observation{
+			ID: fmt.Sprintf("obs-%d-%s-%s", s.day, ev.ID, s.heroName), SourceEvent: ev.ObservationSources[s.heroName],
+			Source: "local_observation", Content: content, VisibleTo: s.heroName, LocationScope: ev.Location,
+			Credibility: 0.95, ArrivalDay: s.day, WritableToMem: true,
+		})
 	}
 	return pkt
 }
@@ -1135,7 +1144,8 @@ func (s *Simulator) recordChronicle(obs ObservationPacket, proposals []engine.Pr
 	for _, p := range proposals {
 		for _, c := range p.Changes {
 			s.chronicle = append(s.chronicle, ChronicleEntry{
-				Day: s.day, Kind: "STATE", Time: now(),
+				SourceEvents: []string{fmt.Sprintf("event:%d:%s", p.BaseRevision+1, p.CommandID)},
+				Day:          s.day, Kind: "STATE", Time: now(),
 				Content:    fmt.Sprintf("[%s] %s → %v", c.Path, c.Op, c.Value),
 				Visibility: "public",
 
@@ -1145,19 +1155,19 @@ func (s *Simulator) recordChronicle(obs ObservationPacket, proposals []engine.Pr
 	// FACT：来自事件/感知
 	for _, o := range obs.Observations {
 		s.chronicle = append(s.chronicle, ChronicleEntry{
-			Day: s.day, Kind: "FACT", Time: now(),
+			Day: s.day, Kind: "OBSERVATION", Time: now(),
 			Content:    o.Content,
-			Visibility: "public",
-			Source:     o.Source,
-			Weight:     0.5,
-			Tags:       []string{"观察"},
+			Visibility: "restricted", Audience: []string{obs.Recipient}, SourceEvents: []string{o.SourceEvent},
+			Source: o.Source,
+			Weight: 0.5,
+			Tags:   []string{"观察"},
 		})
 	}
 	for _, ev := range events {
 		s.chronicle = append(s.chronicle, ChronicleEntry{
-			Day: s.day, Kind: "FACT", Time: now(),
+			Day: s.day, Kind: "CANDIDATE", Time: now(),
 			Content:    fmt.Sprintf("【%s】%s：%s", ev.Type, ev.Title, ev.Frame),
-			Visibility: "public",
+			Visibility: "author_only",
 
 			Weight: 0.3 + ev.Severity*0.7, Tags: []string{"事件", ev.Type}})
 	}

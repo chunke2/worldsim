@@ -23,6 +23,17 @@ type LLMClient struct {
 	WorldRefs string                           // 世界参考资料（用户上传附件聚合），非空时注入到所有系统提示
 }
 
+// ForCharacter removes omniscient references from an independent character request.
+func (c *LLMClient) ForCharacter() *LLMClient {
+	if c == nil {
+		return nil
+	}
+	copy := *c
+	copy.WorldRefs = ""
+	copy.Tools = nil
+	return &copy
+}
+
 // Complete 用默认模型调用（normal 档位）
 func (c *LLMClient) Complete(ctx context.Context, system, user string) (string, error) {
 	return c.CompleteTier(ctx, "normal", system, user)
@@ -276,9 +287,9 @@ func EventGenLLM(ctx context.Context, c *LLMClient, st *engine.WorldState, wb *w
 0. 世界背景与事件类型（严格遵守）：
 ` + worldCtx + `
 1. 输出严格 JSON 数组，格式：
-[{"id":"ev-<天>-<序号>","type":"daily|conflict|wonder|romance|opportunity|crisis|revelation|luck|disaster|quest|mystery|rival|milestone|windfall|slice","title":"...","location":"本世界地点（从世界背景里取）","severity":<0~1数值>,"frame":"遭遇场景描述（不含NPC具体言行）","first_actor":"protagonist|npc_某角色名","npcs":["某角色名"],"new_characters":[{"name":"新角色名","gender":"女","identity":"...","persona":"一句话人设","location":"出场地点","role_hint":"love_interest|important_npc|rival|minor_npc|temporary_npc","tier":"core|support|walkon"}],"rel_effect":"感情/关系影响说明","foreshadow":"伏笔名","resolve_foreshadow":"伏笔名","next_events":[{"title":"后续事件标题","frame":"后续事件框架"}],"options":["...","..."]}]
+[{"id":"ev-<天>-<序号>","type":"daily|conflict|wonder|romance|opportunity|crisis|revelation|luck|disaster|quest|mystery|rival|milestone|windfall|slice","title":"...","location":"本世界地点（从世界背景里取）","severity":<0~1数值>,"frame":"作者级候选框架","observations":{"角色真实姓名":"该角色在此地能亲眼看到或听到的内容"},"first_actor":"protagonist|npc_某角色名","npcs":["某角色名"],"new_characters":[{"name":"新角色名","gender":"女","identity":"...","persona":"一句话人设","location":"出场地点","role_hint":"love_interest|important_npc|rival|minor_npc|temporary_npc","tier":"core|support|walkon"}],"rel_effect":"感情/关系影响说明","foreshadow":"伏笔名","resolve_foreshadow":"伏笔名","next_events":[{"title":"后续事件标题","frame":"后续事件框架"}],"options":["...","..."]}]
 2. severity 0~1：日常0.1-0.3、冲突0.4-0.6、奇遇/重大/感情进展0.7-0.9（0.75以上会触发用户抉择）；**slice（生活切片）0.2-0.4**
-3. frame 只写"遭遇框架"（场景/氛围/人物出现），NPC 具体说出口的话由 NPC Agent 实时生成
+3. frame 是作者级候选框架，不能作为角色观察。每个事件另外输出 observations 对象：键是本事件所在地的角色真实姓名，值是该角色能亲眼看到或听到的具体内容。不得含其他角色的内心、秘密答案或未来安排。只有此对象经过地点过滤后传给对应角色。NPC 具体说出口的话由 NPC Agent 实时生成。
 4. 生成 1-3 个事件，类型尽量多样；与主角当前处境相关（钱少就少消费场景）；优先选用事件类型池里的设定，避免凭空造新元素。
    **宁精勿滥**：只有今天有"值得展开的事"才生成事件——冲突、奇遇、机会、危机、感情进展、真相线索、伏笔推进、爽点、反派行动，至少占一样。如果今天确实风平浪静、没有任何戏剧价值的事，直接返回空数组 []（系统会自动快进时间，不浪费篇幅）。**严禁为了凑数生成"平淡的一天""无事发生"这类水事件。**
 5. 事件若涉及常驻NPC（世界背景/世界书里的角色），必须在 npcs 数组里列出，并把 first_actor 设为该 NPC（如"npc_角色名"）——这样会触发 NPC 自主对话。
@@ -373,15 +384,16 @@ const threeQuestionPrompt = `你是主角 {HERO}，生活在这个世界里。�
 
 // ProtagonistDecideLLM 主角三问决策 → 行动提案（返回提案与三问推理文本）
 func ProtagonistDecideLLM(ctx context.Context, c *LLMClient, st *engine.WorldState, obs ObservationPacket, hero string, wb *worldbook.Worldbook, memories string) (*engine.Proposal, string, error) {
+	c = c.ForCharacter()
+	if obs.Recipient != hero {
+		return nil, "", fmt.Errorf("observation recipient mismatch")
+	}
 	ctx = llm.WithSpan(ctx, "主角决策")
 	heroJSON, _ := json.MarshalIndent(slimEntities(map[string]engine.Entity{hero: st.Entities[hero]}), "", "  ")
 	obsJSON, _ := json.MarshalIndent(obs, "", "  ")
 
-	worldCtx := ""
-	if wb != nil {
-		// 主角视角：社会常识+地区常识+明面势力+角色认知（不含 L5 秘密）
-		worldCtx = wb.ForProtagonist(hero, "")
-	}
+	worldCtx, _ := st.Entities[hero].Extra["known_world"].(string)
+	// Legacy worldbook A1 explicitly contains hidden truths; no implicit public scope.
 
 	system := strings.ReplaceAll(threeQuestionPrompt, "{HERO}", hero)
 	system += "\n\n【你眼中的世界（普通人的认知，不要表现出你本不该知道的事）】\n" + worldCtx
@@ -457,6 +469,9 @@ func GMJudgeLLM(ctx context.Context, c *LLMClient, st *engine.WorldState, p *eng
 // 返回：选中选项的 ID（A/B/C…）+ 一句选择理由。
 // 依据：主角今天的行动方向 + 事件情境 + 主角处境，让每个岔口的 AI 代决各不相同且贴合主角。
 func DecideChoiceLLM(ctx context.Context, c *LLMClient, hero string, ev EventCard, opts []DecisionOption, action string) (string, string) {
+	c = c.ForCharacter()
+	ev.Frame = ev.Observations[hero]
+	ev.Title = "已观察到的选择"
 	ctx = llm.WithSpan(ctx, "决策代决")
 	if len(opts) == 0 {
 		return "", ""

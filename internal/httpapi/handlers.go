@@ -319,11 +319,22 @@ func (h *Handlers) PutAPIConfig(w http.ResponseWriter, r *http.Request) {
 	if h.rejectIfTaskRunning(w, r) {
 		return
 	}
-	var newCfg config.APIConfig
-	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+	var patch json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		h.writeErrorReq(w, r, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
+	base, err := config.LoadAPIConfig(h.apiCfgPath)
+	if err != nil {
+		h.writeErrorReq(w, r, 500, "load_api_config_failed", err.Error())
+		return
+	}
+	merged, err := config.MergeAPIConfig(base, patch)
+	if err != nil {
+		h.writeErrorReq(w, r, 400, "invalid_json", err.Error())
+		return
+	}
+	newCfg := *merged
 
 	if newCfg.HTTPTimeoutSeconds <= 0 {
 		newCfg.HTTPTimeoutSeconds = 300
