@@ -8,6 +8,21 @@ import (
 	"testing"
 )
 
+func TestSnapshotDoesNotAliasLiveState(t *testing.T) {
+	e := NewStateEngine(Rules{}, "")
+	e.State().Entities["A"] = Entity{Extra: map[string]any{"private": "original"}}
+	snapshot, err := e.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := snapshot.Entities["A"]
+	a.Extra["private"] = "changed"
+	delete(snapshot.Entities, "A")
+	if e.State().Entities["A"].Extra["private"] != "original" {
+		t.Fatal("snapshot consumer mutated authoritative state")
+	}
+}
+
 func TestIdentityNeverUsesMapOrder(t *testing.T) {
 	s := &WorldState{Entities: map[string]Entity{"A": {}, "B": {}}, WorldLevel: WorldLevel{Protagonist: "B", NarrativePOV: "A"}}
 	for i := 0; i < 100; i++ {

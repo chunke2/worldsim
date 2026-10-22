@@ -151,6 +151,22 @@ func (e *StateEngine) SetSoftValidator(f SoftValidator) { e.softValidator = f }
 
 func (e *StateEngine) State() *WorldState { return e.state }
 
+// Snapshot returns a detached state under the engine lock, for derived consumers
+// such as the character Agent registry. They must never modify the live state.
+func (e *StateEngine) Snapshot() (*WorldState, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b, err := json.Marshal(e.state)
+	if err != nil {
+		return nil, err
+	}
+	var snapshot WorldState
+	if err := json.Unmarshal(b, &snapshot); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
 // Submit 是全系统唯一写路径（§1.1）：
 //
 //	硬约束校验(程序) → 软规则校验(GM) → 原子提交 → event_log 追加

@@ -584,6 +584,9 @@ func (s *Simulator) runDay(ctx context.Context) (*DayResult, error) {
 		}
 		if err := s.engine.Submit(ctx, &regProp); err == nil {
 			res.Proposals = append(res.Proposals, regProp)
+			if err := s.ReconcileCharacterAgents(); err != nil {
+				return nil, fmt.Errorf("新人物已提交，Agent 注册待重试: %w", err)
+			}
 			for _, c := range regChanges {
 				parts := strings.SplitN(c.Path, ".", 3)
 				if len(parts) >= 2 && parts[0] == "entities" && parts[1] != s.heroName {

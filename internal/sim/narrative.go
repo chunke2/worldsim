@@ -3,6 +3,7 @@ package sim
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"worldsim/internal/engine"
@@ -12,7 +13,16 @@ import (
 
 // RunDay performs the narrative guard before any model call. Assessment is a
 // conservative evidence check, not a claim that a quiet scene has no value.
-func (s *Simulator) RunDay(ctx context.Context) (*DayResult, error) {
+func (s *Simulator) RunDay(ctx context.Context) (result *DayResult, resultErr error) {
+	if err := s.ReconcileCharacterAgents(); err != nil {
+		return nil, fmt.Errorf("角色 Agent 注册失败: %w", err)
+	}
+	// Even a partially committed turn must reconcile deaths/new characters.
+	defer func() {
+		if err := s.ReconcileCharacterAgents(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("世界可能已提交，角色 Agent 同步待重试: %w", err))
+		}
+	}()
 	journal, err := narrative.ReadJournal(s.worldDir)
 	if err != nil {
 		return nil, err

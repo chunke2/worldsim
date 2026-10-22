@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"worldsim/internal/characteragent"
+	"worldsim/internal/engine"
 )
 
 // ---------- 时间回退（快照制） ----------
@@ -119,6 +122,23 @@ func (s *Simulator) RewindTo(day int) (SnapshotMeta, error) {
 			}
 			if n == 0 {
 				return SnapshotMeta{}, fmt.Errorf("快照无有效文件: %s", sn.Dir)
+			}
+			// Registry identities survive rewind, while active/dormant state is
+			// projected from the restored world. This does not roll back memory.
+			stateBytes, err := os.ReadFile(filepath.Join(s.worldDir, "world_state.json"))
+			if err != nil {
+				return sn, fmt.Errorf("世界已回退，Agent 注册表待恢复: %w", err)
+			}
+			var restored engine.WorldState
+			if err := json.Unmarshal(stateBytes, &restored); err != nil {
+				return sn, fmt.Errorf("世界已回退，Agent 注册表待恢复: %w", err)
+			}
+			registry, err := characteragent.NewRegistry(s.worldDir)
+			if err != nil {
+				return sn, err
+			}
+			if _, err := registry.ReconcileAfterRewind(&restored); err != nil {
+				return sn, fmt.Errorf("世界已回退，Agent 注册表待恢复: %w", err)
 			}
 			return sn, nil
 		}

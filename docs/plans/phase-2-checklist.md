@@ -6,7 +6,7 @@
 
 - [x] 2A-1：定义 ProviderRegistry、ModelRef、三档 AgentImportance、AgentRuntimeConfig，提供配置校验和无密钥公开视图。
 - [x] 2A-2：兼容迁移旧单 API 配置；局部保存保留密钥和高级参数，前端读取不返回密钥。
-- [ ] 2A-3：实现 AgentRegistry.Reconcile；按稳定人物 ID 自动注册，死亡/离场休眠，恢复时保留身份。
+- [x] 2A-3：实现 AgentRegistry.Reconcile；按稳定人物 ID 自动注册，死亡/离场休眠，恢复时保留身份。
 - [ ] 2A-4：增加 Provider 与 Agent 配置 API、版本冲突检查和运行中保存保护。
 - [ ] 2A-5：操作台增加 Provider 管理、三档模型配置、人物重要性与独立模型覆盖。
 - [ ] 2A-6：以固定五人样本验证自动注册、模型解析、配置持久化与密钥边界。
@@ -40,4 +40,7 @@
 - 2A-2：已完成（2026-10-22）。`api.json` 支持多 Provider；旧单 API 在内存中映射为保留 ID `legacy-default`，加载不改写文件，主动保存时才持久化。该兼容 Provider 通过原有顶层字段更新，其他 Provider 的局部保存不会覆盖它。
 - 2A-2 密钥语义：省略、空白或 null 保留；`clear_api_key=true` 显式清除；新值替换。改变服务地址必须同时提供新密钥或显式清除。GET/PUT 配置响应仅返回 `has_api_key` 和公开字段，自由格式参数保留在磁盘中。连接测试在服务端合并已保存密钥，不修改配置，只发送一次同步请求。
 - 2A-2 验证：迁移前后文件一致、重载幂等、Provider 局部更新、高级参数保留、公开配置往返、密钥清除/替换、地址变更拒绝，以及 GET/PUT/本地 mock 连接测试均通过。`go test ./...`、`go build ./...`、`go vet ./...` 和前端构建通过。前端构建有 SeedNovelPanel 原有 label 可访问性警告；未消耗真实模型 Token。
-- 当前已接入全局配置和现有 API 设置页。多 Provider 操作台、Agent 自动注册和角色独立决策尚未实现。下一项是 2A-3：AgentRegistry.Reconcile。
+- 2A-3：已完成（2026-10-22）。新增 `internal/characteragent`，以独立世界 ID 和现有实体 ID 分配稳定 Agent ID，持久化到 `agent_registry.json`，建立 `agents/{agent_id}/` 分区。新注册时按角色标记分配档位，后续同步不覆盖；死亡、离场、背景化或从世界移除时休眠，恢复时沿用原身份和私有文件。
+- 2A-3 接入点：加载已有世界、世界初始化完成、手动提案提交后、模拟周期前后及新人物提交后。失败记录明确诊断；世界提案已提交时响应独立的 `agent_registry_error`，不会将派生记录失败伪装为世界行动被拒绝。
+- 2A-3 验证：固定五人、幂等同步、重启身份稳定、档位保留、生命周期、私有文件不变、非法实体/损坏注册表拒绝、写入失败重试、并发同步、旧快照拒绝和显式回档恢复均通过。`go test ./...`、`go build ./...`、`go vet ./...`、`git diff --check` 通过；测试仅用临时目录和 mock，没有使用付费模型或运行用户世界。
+- 当前已完成配置基础和 Agent 身份注册。角色目录尚不包含迁移后的认知/记忆，Agent 尚未独立调用模型。下一项是 2A-4：Provider 与 Agent 配置 API、版本冲突检查和运行保护。实现说明见 [2A-3 注册表](phase-2a-3-registry.md)。

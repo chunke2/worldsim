@@ -801,6 +801,9 @@ func (ws *worldServer) newInstance(name string) *worldInstance {
 	if se.State().Revision > 0 {
 		w.sim = sim.NewSimulator(se, dir)
 		w.heroName = w.sim.HeroName() // 恢复主角名（role标记识别，防视角漂移）
+		if err := w.sim.ReconcileCharacterAgents(); err != nil {
+			log.Printf(" [角色 Agent] %s 注册失败，运行前需修复: %v", name, err)
+		}
 	}
 
 	// 小说化写手（放世界自己的目录：worlds/{世界名}/novel/——世界的一切产物内聚，最好找）
@@ -1135,9 +1138,20 @@ func (ws *worldServer) handleProposal(w http.ResponseWriter, r *http.Request) {
 	if err := inst.engine.Save(filepath.Join(inst.dir, "world_state.json")); err != nil {
 		log.Printf(" [世界模拟] 保存状态失败: %v", err)
 	}
+	registryError := ""
+	// The world proposal is already committed. Report a derived-registry failure
+	// separately so clients do not mistake it for a rejected world action.
+	agentSim := inst.sim
+	if agentSim == nil {
+		agentSim = sim.NewSimulator(inst.engine, inst.dir)
+	}
+	if err := agentSim.ReconcileCharacterAgents(); err != nil {
+		registryError = err.Error()
+	}
 	ws.writeJSON(w, 200, map[string]any{
-		"ok":       true,
-		"revision": inst.engine.State().Revision,
+		"ok":                   true,
+		"revision":             inst.engine.State().Revision,
+		"agent_registry_error": registryError,
 	})
 }
 
@@ -1284,13 +1298,18 @@ func (ws *worldServer) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	inst.applyLLM() // 自动启用 LLM（api.json 配置有效时）——init 后模拟立即走真实 Agent
 	inst.created = true
+	registryError := ""
+	if err := inst.sim.ReconcileCharacterAgents(); err != nil {
+		registryError = err.Error()
+	}
 	logging.InfoW(inst.name, "init", fmt.Sprintf("世界初始化完成：主角=%s，Day1，实体=%d", hero, len(inst.engine.State().Entities)), map[string]any{"protagonist": hero, "entities": len(inst.engine.State().Entities)})
 	ws.writeJSON(w, 200, map[string]any{
-		"ok":          true,
-		"world":       req.WorldName,
-		"revision":    inst.engine.State().Revision,
-		"day":         inst.engine.State().Day,
-		"protagonist": req.Protagonist,
+		"ok":                   true,
+		"world":                req.WorldName,
+		"revision":             inst.engine.State().Revision,
+		"day":                  inst.engine.State().Day,
+		"protagonist":          req.Protagonist,
+		"agent_registry_error": registryError,
 	})
 }
 
