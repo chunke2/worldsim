@@ -9,15 +9,17 @@ import (
 )
 
 type APIConfig struct {
-	APIKey              string            `json:"api_key"`
-	BaseURL             string            `json:"base_url"`
-	URLStrict           bool              `json:"url_strict,omitempty"` // true = 不自动插入 /v1，仅补 /chat/completions
-	Model               string            `json:"model"`
-	MaxTokens           int               `json:"max_tokens,omitempty"` // 0 = 模型默认；Agent 调用建议 ≥ 8192
-	HTTPTimeoutSeconds  int               `json:"http_timeout_seconds"`
-	ContextBudgetTokens int               `json:"context_budget_tokens"` // 全书优化上下文预算，默认 900000
-	ProxyURL            string            `json:"proxy_url,omitempty"`   // 可选：HTTP CONNECT 代理。容器内经宿主直连中转站时填 http://host.docker.internal:<port>；空=直连
-	ModelTiers          map[string]string `json:"model_tiers,omitempty"` // 模型分层：fast/normal/premium → 模型名（缺省用 Model）
+	Providers           map[string]Provider `json:"providers,omitempty"`
+	DefaultProvider     string              `json:"default_provider,omitempty"`
+	APIKey              string              `json:"api_key"`
+	BaseURL             string              `json:"base_url"`
+	URLStrict           bool                `json:"url_strict,omitempty"` // true = 不自动插入 /v1，仅补 /chat/completions
+	Model               string              `json:"model"`
+	MaxTokens           int                 `json:"max_tokens,omitempty"` // 0 = 模型默认；Agent 调用建议 ≥ 8192
+	HTTPTimeoutSeconds  int                 `json:"http_timeout_seconds"`
+	ContextBudgetTokens int                 `json:"context_budget_tokens"` // 全书优化上下文预算，默认 900000
+	ProxyURL            string              `json:"proxy_url,omitempty"`   // 可选：HTTP CONNECT 代理。容器内经宿主直连中转站时填 http://host.docker.internal:<port>；空=直连
+	ModelTiers          map[string]string   `json:"model_tiers,omitempty"` // 模型分层：fast/normal/premium → 模型名（缺省用 Model）
 	// ExtraBody 原样并入每次 chat/completions 请求体的顶层字段，例如 {"enable_thinking": false}。
 	// 用途：推理模型会把 max_tokens 大量消耗在思考通道上，长 JSON 输出（素材规划/大纲/章节等）
 	// 常见 finish_reason=length 且正文为空；关掉思考通道可显著提速并避免空正文。
@@ -41,7 +43,8 @@ func SaveAPIConfig(c *APIConfig, path string) error {
 	return fsutil.WriteFileAtomic(path, b)
 }
 
-// MergeAPIConfig preserves omitted fields. Explicit zero/null values clear fields.
+// MergeAPIConfig preserves omitted fields and blank credentials. Clearing a key
+// requires clear_api_key=true; provider entries support the same operation.
 func MergeAPIConfig(base *APIConfig, patch []byte) (*APIConfig, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(patch, &fields); err != nil {
@@ -60,7 +63,7 @@ func MergeAPIConfig(base *APIConfig, patch []byte) (*APIConfig, error) {
 			return nil, err
 		}
 	}
-	if err := json.Unmarshal(patch, &out); err != nil {
+	if err := mergePrivatePatch(&out, fields); err != nil {
 		return nil, err
 	}
 	if out.MaxTokens < 0 || out.HTTPTimeoutSeconds < 0 {
@@ -68,6 +71,9 @@ func MergeAPIConfig(base *APIConfig, patch []byte) (*APIConfig, error) {
 	}
 	if out.Novel != nil && (out.Novel.MaxTokens < 0 || out.Novel.HTTPTimeoutSeconds < 0) {
 		return nil, fmt.Errorf("小说生成 token 和超时不能为负数")
+	}
+	if err := out.MigrateProviders(); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }
@@ -225,6 +231,9 @@ func LoadAPIConfig(path string) (*APIConfig, error) {
 
 	if cfg.HTTPTimeoutSeconds <= 0 {
 		cfg.HTTPTimeoutSeconds = 300
+	}
+	if err := cfg.MigrateProviders(); err != nil {
+		return nil, err
 	}
 	// ContextBudgetTokens <= 0 is filled in by llm.EnsureContextBudget at
 	// startup (needs an API round-trip, so it lives outside this package).

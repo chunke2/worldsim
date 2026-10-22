@@ -33,7 +33,7 @@
 
   $: cfgBase = $apiConfig?.base_url || '';
   $: cfgModel = $apiConfig?.model || '';
-  $: cfgKey = $apiConfig?.api_key || '';
+  $: cfgKey = $apiConfig?.has_api_key ? '••••••••' : '';
   $: cfgTimeout = $apiConfig?.http_timeout_seconds || 300;
 
   let localApiCfg = { base_url: '', url_strict: false, model: '', api_key: '', http_timeout_seconds: 300, max_tokens: 0, context_budget_tokens: 900000 };
@@ -113,8 +113,9 @@
 
   async function saveAPIConfig() {
     try {
-      await api('PUT', '/api/config/api', localApiCfg);
-      apiConfig.set({ ...localApiCfg });
+      const saved = await api('PUT', '/api/config/api', localApiCfg);
+      localApiCfg.api_key = '';
+      apiConfig.set(saved);
       addToast($t('config.api.saved'), 'success');
     } catch (e) { addToast(e.message, 'error'); }
   }
@@ -415,7 +416,7 @@
           </div>
           <div class="col-span-2">
             <span class="text-xs text-base-content/50 mb-0.5 block">{$t('config.api.key')}</span>
-            <input type="password" class="input input-sm w-full" bind:value={localApiCfg.api_key} placeholder="sk-..." disabled={$taskRunning || testingApi} />
+            <input type="password" class="input input-sm w-full" bind:value={localApiCfg.api_key} placeholder={$apiConfig?.has_api_key ? '已保存密钥；留空保留，输入新值替换' : 'sk-...'} disabled={$taskRunning || testingApi} />
           </div>
         </div>
         {#if $apiTestResult}

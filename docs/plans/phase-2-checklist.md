@@ -5,7 +5,7 @@
 ## 2A：配置与注册
 
 - [x] 2A-1：定义 ProviderRegistry、ModelRef、三档 AgentImportance、AgentRuntimeConfig，提供配置校验和无密钥公开视图。
-- [ ] 2A-2：兼容迁移旧单 API 配置；局部保存保留密钥和高级参数，前端读取不返回密钥。
+- [x] 2A-2：兼容迁移旧单 API 配置；局部保存保留密钥和高级参数，前端读取不返回密钥。
 - [ ] 2A-3：实现 AgentRegistry.Reconcile；按稳定人物 ID 自动注册，死亡/离场休眠，恢复时保留身份。
 - [ ] 2A-4：增加 Provider 与 Agent 配置 API、版本冲突检查和运行中保存保护。
 - [ ] 2A-5：操作台增加 Provider 管理、三档模型配置、人物重要性与独立模型覆盖。
@@ -37,4 +37,7 @@
 ## 执行记录
 
 - 2A-1：已完成（2026-10-22）。新增 `internal/config/agent_runtime.go`：Provider 注册配置、公开视图、三档策略、人物模型覆盖、严格 JSON 解析和模型引用解析。新增 `internal/config/agent_runtime_test.go`，验证人物覆盖优先、Provider 缺失拒绝、公开视图密钥过滤、世界配置拒绝凭据字段和参数校验；`go test ./internal/config` 通过。
-- 当前交付仅为配置基础类型。尚未接入 `api.json`、HTTP API 或运行时，已有设置和角色执行行为不会因此改变。下一项是 2A-2：兼容迁移及前端密钥读取边界。
+- 2A-2：已完成（2026-10-22）。`api.json` 支持多 Provider；旧单 API 在内存中映射为保留 ID `legacy-default`，加载不改写文件，主动保存时才持久化。该兼容 Provider 通过原有顶层字段更新，其他 Provider 的局部保存不会覆盖它。
+- 2A-2 密钥语义：省略、空白或 null 保留；`clear_api_key=true` 显式清除；新值替换。改变服务地址必须同时提供新密钥或显式清除。GET/PUT 配置响应仅返回 `has_api_key` 和公开字段，自由格式参数保留在磁盘中。连接测试在服务端合并已保存密钥，不修改配置，只发送一次同步请求。
+- 2A-2 验证：迁移前后文件一致、重载幂等、Provider 局部更新、高级参数保留、公开配置往返、密钥清除/替换、地址变更拒绝，以及 GET/PUT/本地 mock 连接测试均通过。`go test ./...`、`go build ./...`、`go vet ./...` 和前端构建通过。前端构建有 SeedNovelPanel 原有 label 可访问性警告；未消耗真实模型 Token。
+- 当前已接入全局配置和现有 API 设置页。多 Provider 操作台、Agent 自动注册和角色独立决策尚未实现。下一项是 2A-3：AgentRegistry.Reconcile。

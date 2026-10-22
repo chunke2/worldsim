@@ -312,7 +312,7 @@ func (h *Handlers) PostTaskStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) GetAPIConfig(w http.ResponseWriter, r *http.Request) {
-	h.writeJSON(w, http.StatusOK, h.apiCfg)
+	h.writeJSON(w, http.StatusOK, config.PublicAPIConfig(h.apiCfg))
 }
 
 func (h *Handlers) PutAPIConfig(w http.ResponseWriter, r *http.Request) {
@@ -358,18 +358,29 @@ func (h *Handlers) PutAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.apiCfg = &newCfg
-	h.writeJSON(w, http.StatusOK, h.apiCfg)
+	h.writeJSON(w, http.StatusOK, config.PublicAPIConfig(h.apiCfg))
 }
 
 func (h *Handlers) PostAPITest(w http.ResponseWriter, r *http.Request) {
 	if h.rejectIfTaskRunning(w, r) {
 		return
 	}
-	var testCfg config.APIConfig
-	if err := json.NewDecoder(r.Body).Decode(&testCfg); err != nil {
+	var patch json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		h.writeErrorReq(w, r, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
+	base, err := config.LoadAPIConfig(h.apiCfgPath)
+	if err != nil {
+		h.writeErrorReq(w, r, 500, "load_api_config_failed", "API configuration unavailable")
+		return
+	}
+	merged, err := config.MergeAPIConfig(base, patch)
+	if err != nil {
+		h.writeErrorReq(w, r, 400, "invalid_json", err.Error())
+		return
+	}
+	testCfg := *merged
 	if err := llm.ValidateConfig(&testCfg); err != nil {
 		h.writeErrorReq(w, r, http.StatusBadRequest, "invalid_json", err.Error())
 		return
@@ -378,7 +389,7 @@ func (h *Handlers) PostAPITest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	resp, err := llm.CallAPIMessages(ctx, &testCfg, []llm.Message{
+	completion, err := llm.CallAPIMessagesSync(ctx, &testCfg, []llm.Message{
 		{Role: "user", Content: "Hi"},
 	})
 	if err != nil {
@@ -390,6 +401,7 @@ func (h *Handlers) PostAPITest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp := completion.Content
 	result := map[string]interface{}{
 		"success": true,
 		"message": "连接成功",
