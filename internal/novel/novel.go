@@ -24,6 +24,7 @@ import (
 // ---------- 章节计划 ----------
 
 type ChapterPlan struct {
+	SourceMode   string `json:"source_mode,omitempty"`
 	SourceDigest string `json:"source_digest,omitempty"`
 	Num          int    `json:"num"`
 	Title        string `json:"title"`
@@ -36,7 +37,10 @@ type ChapterPlan struct {
 
 // Writer 小说化写手（把模拟成果写成可阅读的小说）
 type Writer struct {
-	NarrativeContext string // Author plan, never character knowledge.
+	Independent      *IndependentSource // Explicit POV source capsule; bypasses all legacy global context.
+	semanticReview   *SemanticReview
+	IndependentCall  IndependentCompletion // Optional stateless transport for deterministic tests.
+	NarrativeContext string                // Author plan, never character knowledge.
 	APICfg           *config.APIConfig
 	BookTitle        string
 	BookDir          string // storys/{书名}/chapters/
@@ -497,6 +501,9 @@ func (w *Writer) planChapterNarrative(ctx context.Context, p ChapterPlan, materi
 
 // WriteChapter 生成一章小说正文（LLM），保存到 chapters/NNN_标题.md，返回正文
 func (w *Writer) WriteChapter(ctx context.Context, p ChapterPlan, chronicle []sim.ChronicleEntry, thinkings map[int]string, entities map[string]engine.Entity) (string, error) {
+	if w.Independent != nil {
+		return w.writeIndependentChapter(ctx, p, chronicle)
+	}
 	if w.APICfg == nil || w.HeroName == "" {
 		return "", fmt.Errorf("写作配置或叙事视角缺失")
 	}

@@ -29,6 +29,7 @@ type CognitionOwner struct {
 // Observation is a receipt, not a claim that the reported content is true.
 // Trusted delivery code must verify audience and event content before appending.
 type Observation struct {
+	ContextSlot   string         `json:"context_slot,omitempty"`
 	ID            string         `json:"id"`
 	Recipient     CognitionOwner `json:"recipient"`
 	Kind          string         `json:"kind"`
@@ -38,6 +39,7 @@ type Observation struct {
 	WorldRevision int            `json:"world_revision"`
 	Speaker       string         `json:"speaker,omitempty"`
 	Location      string         `json:"location,omitempty"`
+	Persistent    bool           `json:"persistent,omitempty"`
 	AddedRevision int            `json:"added_revision"`
 }
 
@@ -155,6 +157,9 @@ func validateCognition(d CognitionState, owner CognitionOwner) error {
 	}
 	seen := map[string]int{}
 	for _, o := range d.Observations {
+		if o.ContextSlot != "" && (o.ContextSlot != "game_state" || o.Kind != "direct_observation") {
+			return bad("unsupported context slot")
+		}
 		if !cognitionID(o.ID) || seen[o.ID] != 0 || o.Recipient != owner || !cognitionText(o.Text) || !cognitionID(o.SourceID) || o.WorldRevision < 0 || o.AddedRevision < 1 || o.AddedRevision > d.Revision {
 			return bad("observation identity, recipient or provenance")
 		}
@@ -222,6 +227,11 @@ func (s *CognitionStore) validateLocked(state CognitionState) error {
 	for _, observation := range state.Observations {
 		if observation.WorldRevision > d.WorldRevision {
 			return errors.New("cognition is ahead of registered world; synchronize world or restore an explicit cognition branch")
+		}
+	}
+	for _, thought := range state.Thoughts {
+		if thought.WorldRevision > d.WorldRevision {
+			return errors.New("thought belongs to a future world revision; restore an explicit cognition branch")
 		}
 	}
 	return nil

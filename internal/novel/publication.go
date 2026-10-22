@@ -19,15 +19,16 @@ import (
 )
 
 type Publication struct {
-	POV             string      `json:"pov"`
-	ReaderKnowledge string      `json:"reader_knowledge"` // Chapter summary, distinct from character belief and author intent.
-	Version         string      `json:"version"`
-	Plan            ChapterPlan `json:"plan"`
-	Title           string      `json:"title"`
-	Body            string      `json:"body"`
-	Summary         string      `json:"summary"`
-	SourceIDs       []string    `json:"source_ids"`
-	SourceDigest    string      `json:"source_digest"`
+	SemanticReview  *SemanticReview `json:"semantic_review,omitempty"`
+	POV             string          `json:"pov"`
+	ReaderKnowledge string          `json:"reader_knowledge"` // Chapter summary, distinct from character belief and author intent.
+	Version         string          `json:"version"`
+	Plan            ChapterPlan     `json:"plan"`
+	Title           string          `json:"title"`
+	Body            string          `json:"body"`
+	Summary         string          `json:"summary"`
+	SourceIDs       []string        `json:"source_ids"`
+	SourceDigest    string          `json:"source_digest"`
 	// Structural validation cannot certify literary quality or semantic truth.
 	Review  string            `json:"review"`
 	Quality map[string]string `json:"quality"`
@@ -60,6 +61,9 @@ func (w *Writer) EnsurePlans(ctx context.Context, entries []sim.ChronicleEntry) 
 	}
 	end := 0
 	for _, p := range plans {
+		if w.Independent != nil && p.SourceMode != "independent_v1" {
+			return nil, fmt.Errorf("现有分章不是独立视角来源模式，请创建作品分支，原章节保持不变")
+		}
 		if p.DayEnd > end {
 			end = p.DayEnd
 		}
@@ -76,10 +80,18 @@ func (w *Writer) EnsurePlans(ctx context.Context, entries []sim.ChronicleEntry) 
 		}
 		return plans, nil
 	}
-	next := w.PlanChapters(ctx, fresh, nil)
+	var next []ChapterPlan
+	if w.Independent != nil {
+		next = w.planChaptersHeuristic(fresh, nil)
+	} else {
+		next = w.PlanChapters(ctx, fresh, nil)
+	}
 	for i := range next {
 		next[i].Num = len(plans) + 1
-		next[i].SourceDigest = chapterDigest(next[i], entries)
+		if w.Independent != nil {
+			next[i].SourceMode = "independent_v1"
+		}
+		next[i].SourceDigest = w.sourceDigest(next[i], entries)
 		plans = append(plans, next[i])
 	}
 	if err := os.MkdirAll(w.BookDir, 0755); err != nil {
@@ -141,18 +153,34 @@ func (w *Writer) publish(p ChapterPlan, res llm.CompletionResult, entries []sim.
 	if err != nil {
 		return "", err
 	}
-	if p.SourceDigest != "" && p.SourceDigest != chapterDigest(p, entries) {
+	if p.SourceDigest != "" && p.SourceDigest != w.sourceDigest(p, entries) {
 		return "", fmt.Errorf("分章来源已变化，请创建新的作品分支")
 	}
-	pub := Publication{Version: fmt.Sprintf("%d", time.Now().UnixNano()), Plan: p, Title: title, Body: body, Summary: summary, SourceDigest: chapterDigest(p, entries), Review: "automatic_gates_passed; semantic_review_required", Quality: map[string]string{
+	pub := Publication{Version: fmt.Sprintf("%d", time.Now().UnixNano()), Plan: p, Title: title, Body: body, Summary: summary, SourceDigest: w.sourceDigest(p, entries), Review: "automatic_gates_passed; semantic_review_required", Quality: map[string]string{
 		"completion": "pass", "format": "pass", "provenance": "pass", "continuity": "pass",
 		"fact_semantics": "pending_review", "pov_semantics": "pending_review", "foreshadow_fairness": "pending_review", "arc_effect": "pending_review", "rhythm": "pending_review",
 	}}
+	if w.Independent != nil {
+		if err := w.verifySemanticReview(p, body, summary, entries); err != nil {
+			return "", err
+		}
+		pub.SemanticReview = w.semanticReview
+		pub.Review = "structural_gates_and_model_review_passed; probabilistic_not_proof"
+		for _, key := range []string{"fact_semantics", "pov_semantics", "continuity", "foreshadow_fairness"} {
+			pub.Quality[key] = "model_review_passed"
+		}
+	}
 	pub.POV = w.HeroName
 	pub.ReaderKnowledge = summary
-	for _, e := range entries {
-		if e.Day >= p.DayStart && e.Day <= p.DayEnd && w.EligibleMaterial(e) {
-			pub.SourceIDs = append(pub.SourceIDs, e.SourceEvents...)
+	if w.Independent != nil {
+		for _, fact := range w.chapterFacts(p) {
+			pub.SourceIDs = append(pub.SourceIDs, fact.ID)
+		}
+	} else {
+		for _, e := range entries {
+			if e.Day >= p.DayStart && e.Day <= p.DayEnd && w.EligibleMaterial(e) {
+				pub.SourceIDs = append(pub.SourceIDs, e.SourceEvents...)
+			}
 		}
 	}
 	if len(pub.SourceIDs) == 0 {
@@ -303,6 +331,9 @@ func (w *Writer) CheckContinuityBefore(num int) error {
 		}
 		if p.POV != "" && p.POV != w.HeroName {
 			return fmt.Errorf("叙事视角变化需要新的作品分支")
+		}
+		if w.Independent != nil && (p.Plan.SourceMode != "independent_v1" || p.SemanticReview == nil) {
+			return fmt.Errorf("第%d章不是已审查的独立视角版本，请创建作品分支", n)
 		}
 	}
 	return nil

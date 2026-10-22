@@ -227,6 +227,8 @@ API Key 只存在全局私密配置；世界内的 `agent_runtime.json` 只保�
 
 ## 8. 操作台设计
 
+> 实施落点说明：实际统一操作台是 `worldapp`，生产静态资源为 `uiteg`。2C/2D 已完成独立模式分流，旧世界默认兼容；最新契约与验收以 `phase-2-checklist.md`、`phase-2c-runtime.md`、`phase-2d-narrative.md` 为准。下面 JSON/模块示意属于最初设计，实际人物覆盖字段为 `model_override: {provider_id, model}`。
+
 在 `worldweb` 操作台增加“角色 Agent”面板，分为三块。
 
 ### API Provider

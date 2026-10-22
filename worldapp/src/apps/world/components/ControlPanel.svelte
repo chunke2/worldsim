@@ -139,7 +139,7 @@
   </div>
 
   <button class="btn btn-sm btn-outline w-full" on:click={() => activeTab.set('agents')}>API 服务 / 角色 Agent 设置</button>
-  <p class="text-[11px] text-base-content/60">三档人物模型在上方设置；下方为当前模拟使用的兼容管线。</p>
+  <p class="text-[11px] text-base-content/60">在角色设置中选择运行方式；下方模型分层用于兼容管线，独立模式按人物 Provider 调用。</p>
 
   <div>
     <label class="label py-0 text-xs text-base-content/60">主角名</label>
@@ -185,7 +185,7 @@
   {/if}
 
   <div>
-    <label class="label py-0 text-xs text-base-content/60">单次模拟</label>
+    <label class="label py-0 text-xs text-base-content/60">单次推进（独立模式按回合）</label>
     <div class="flex gap-2">
       <input class="input input-sm input-bordered w-16" type="number" min="1" max="30" bind:value={daysNum} />
       <select class="select select-sm select-bordered flex-1" bind:value={simMode}>

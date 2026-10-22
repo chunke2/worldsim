@@ -9,6 +9,7 @@ import (
 	"context"
 	"time"
 
+	"worldsim/internal/characteragent"
 	"worldsim/internal/engine"
 )
 
@@ -61,6 +62,7 @@ type ObservationPacket struct {
 // Weight=戏剧权重（0~1）：写手按此选材——≥0.55进场景，0.3~0.55进背景压缩，<0.3 一句话带过
 // Tags=角色/地点/伏笔/冲突标记（供"本章焦点"统计主线）
 type ChronicleEntry struct {
+	OccurrenceID string   `json:"occurrence_id,omitempty"`
 	SourceEvents []string `json:"source_events,omitempty"`
 	Audience     []string `json:"audience,omitempty"`
 	Day          int      `json:"day"`
@@ -124,15 +126,16 @@ type DynamicAgent struct {
 // ---------- 模拟结果 ----------
 
 type DayResult struct {
-	Day       int               `json:"day"`
-	Events    []EventCard       `json:"events"`
-	Chronicle []ChronicleEntry  `json:"chronicle"`
-	Proposals []engine.Proposal `json:"proposals"`
-	Dialogue  []DialogueTurn    `json:"dialogue,omitempty"` // NPC对话（§5.1）
-	Paused    bool              `json:"paused"`             // 是否触发暂停（抉择点）
-	PauseMsg  string            `json:"pause_msg,omitempty"`
-	Mode      string            `json:"mode"`              // scene | summary | skip
-	Skipped   bool              `json:"skipped,omitempty"` // 平淡日快进（事件驱动：未展开模拟）
+	AgentTurn *characteragent.TurnResult `json:"agent_turn,omitempty"`
+	Day       int                        `json:"day"`
+	Events    []EventCard                `json:"events"`
+	Chronicle []ChronicleEntry           `json:"chronicle"`
+	Proposals []engine.Proposal          `json:"proposals"`
+	Dialogue  []DialogueTurn             `json:"dialogue,omitempty"` // NPC对话（§5.1）
+	Paused    bool                       `json:"paused"`             // 是否触发暂停（抉择点）
+	PauseMsg  string                     `json:"pause_msg,omitempty"`
+	Mode      string                     `json:"mode"`              // scene | summary | skip
+	Skipped   bool                       `json:"skipped,omitempty"` // 平淡日快进（事件驱动：未展开模拟）
 }
 
 func now() string { return time.Now().Format("15:04") }

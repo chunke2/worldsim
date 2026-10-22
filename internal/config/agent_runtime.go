@@ -73,8 +73,8 @@ func (r ProviderRegistry) Validate() error {
 		if err != nil || u == nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimSpace(p.BaseURL) != p.BaseURL {
 			return fmt.Errorf("provider %s requires an HTTP(S) base URL without embedded credentials, query or fragment", id)
 		}
-		if p.TimeoutSeconds < 0 || p.MaxParallel < 0 {
-			return fmt.Errorf("negative provider limits for %s", id)
+		if p.TimeoutSeconds < 0 || p.TimeoutSeconds > 3600 || p.MaxParallel < 0 || p.MaxParallel > 64 {
+			return fmt.Errorf("provider %s timeout must be within 0..3600 and parallelism within 0..64", id)
 		}
 		seen := map[string]bool{}
 		for _, model := range p.Models {
@@ -155,6 +155,7 @@ type CharacterAgentConfig struct {
 // AgentRuntimeConfig is the world-scoped config. Revision is a configuration
 // revision, separate from world event revisions; concurrency enforcement is 2A-4.
 type AgentRuntimeConfig struct {
+	ExecutionMode string                          `json:"execution_mode,omitempty"`
 	SchemaVersion int                             `json:"schema_version"`
 	Revision      int                             `json:"revision"`
 	Tiers         map[AgentImportance]TierPolicy  `json:"tiers"`
@@ -162,6 +163,9 @@ type AgentRuntimeConfig struct {
 }
 
 func (c AgentRuntimeConfig) Validate(r ProviderRegistry) error {
+	if c.ExecutionMode != "" && c.ExecutionMode != "legacy" && c.ExecutionMode != "independent" {
+		return fmt.Errorf("invalid agent execution mode")
+	}
 	if err := r.Validate(); err != nil {
 		return err
 	}
@@ -176,7 +180,7 @@ func (c AgentRuntimeConfig) Validate(r ProviderRegistry) error {
 		if err := p.ModelRef.Validate(r); err != nil {
 			return fmt.Errorf("tier %s: %w", importance, err)
 		}
-		if p.MaxTokens < 0 || p.ContextBudgetTokens < 0 || p.MaxParallel < 0 || p.ReflectionEvery < 0 {
+		if p.MaxTokens < 0 || p.ContextBudgetTokens < 0 || p.MaxParallel < 0 || p.MaxParallel > 64 || p.ReflectionEvery < 0 {
 			return fmt.Errorf("negative limits in tier %s", importance)
 		}
 		if p.Temperature != nil && (math.IsNaN(*p.Temperature) || math.IsInf(*p.Temperature, 0) || *p.Temperature < 0 || *p.Temperature > 2) {

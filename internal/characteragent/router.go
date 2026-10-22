@@ -167,11 +167,10 @@ func (r *ModelRouter) Complete(ctx context.Context, request ModelRequest) (reply
 		return reply, errors.New("character provider request cancelled")
 	}
 	body := map[string]any{}
-	protected := map[string]bool{"model": true, "messages": true, "stream": true, "max_tokens": true, "max_completion_tokens": true, "temperature": true, "tools": true, "tool_choice": true, "functions": true, "function_call": true}
+	if err := config.ValidateIsolatedExtraBody(provider.ExtraBody); err != nil {
+		return reply, err
+	}
 	for k, v := range provider.ExtraBody {
-		if protected[k] {
-			return reply, errors.New("Provider extra_body attempts to override isolated request fields")
-		}
 		body[k] = v
 	}
 	if len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {

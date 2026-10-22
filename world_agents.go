@@ -13,6 +13,11 @@ import (
 )
 
 func (ws *worldServer) registerAgentRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/world/agents/scenario", ws.handleAgentScenario)
+	mux.HandleFunc("GET /api/world/agents/runtime", ws.handleAgentRuntimeGet)
+	mux.HandleFunc("POST /api/world/agents/pressures", ws.handleAgentPressure)
+	mux.HandleFunc("GET /api/world/agents/{character_id}/cognition", ws.handleAgentCognition)
+	mux.HandleFunc("GET /api/world/agents/{character_id}/audit", ws.handleAgentAudit)
 	mux.HandleFunc("GET /api/llm/providers", ws.handleProvidersGet)
 	mux.HandleFunc("PUT /api/llm/providers", ws.handleProvidersPut)
 	mux.HandleFunc("POST /api/llm/providers/{id}/test", ws.handleProviderTest)
@@ -128,7 +133,7 @@ func (ws *worldServer) handleAgentsGet(w http.ResponseWriter, r *http.Request) {
 	providers := config.ProviderRegistry{DefaultProvider: api.DefaultProvider, Providers: api.Providers}
 	for _, id := range ids {
 		a := d.Agents[id]
-		row := map[string]any{"agent_id": a.AgentID, "character_id": id, "state": a.State, "dormant_reason": a.DormantReason, "importance": c.Characters[id].Importance, "autonomous_runtime": false}
+		row := map[string]any{"agent_id": a.AgentID, "character_id": id, "state": a.State, "dormant_reason": a.DormantReason, "importance": c.Characters[id].Importance, "autonomous_runtime": c.ExecutionMode == "independent"}
 		model, err := c.ResolveModel(id, providers)
 		if err != nil {
 			row["model_error"] = err.Error()

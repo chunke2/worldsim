@@ -480,6 +480,12 @@ func (ws *worldServer) handleLoopSet(w http.ResponseWriter, r *http.Request) {
 	if req.Mode != "" {
 		inst.sim.SetMode(req.Mode)
 	}
+	independent, modeErr := inst.sim.IndependentMode()
+	if modeErr != nil {
+		endActivity()
+		ws.agentConfigError(w, modeErr)
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ws.loopCancel = cancel
 	ws.loopRunning = true
@@ -508,6 +514,16 @@ func (ws *worldServer) handleLoopSet(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 			if res, err := inst.sim.RunDay(ctx); err != nil {
+				if independent {
+					if res != nil {
+						inst.lastDay = res
+					}
+					ws.loopMu.Lock()
+					ws.loopConsecFail++
+					ws.loopMu.Unlock()
+					logging.ErrorW(inst.name, "loop", "独立角色回合失败，已停止；不会自动重试或回档", map[string]any{"error": err.Error()})
+					return
+				}
 				// 单日失败不中断循环（中转站抖动/超时），但统计连续失败（供自愈监测判断是否异常）
 				ws.loopMu.Lock()
 				ws.loopConsecFail++
@@ -532,6 +548,17 @@ func (ws *worldServer) handleLoopSet(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			inst.autoSnapshot() // 每7天自动存档（时间回退锚点）
+			if independent {
+				if inst.lastDay.Paused || inst.engine.State().Day >= ws.loopTarget {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(200 * time.Millisecond):
+				}
+				continue
+			}
 
 			// --- 防空转检测：事件生成是否走 dry-run ---
 			snap := logx.M().Snapshot()
@@ -830,7 +857,11 @@ func (ws *worldServer) newInstance(name string) *worldInstance {
 
 // applyLLM 把 inst.llm 应用到 Simulator：世界书 + EnableLLM + GM 软规则
 func (w *worldInstance) applyLLM() {
-	if w.llm == nil || w.sim == nil {
+	if w.sim == nil {
+		return
+	}
+	if w.llm == nil {
+		w.sim.ClearLegacyLLM()
 		return
 	}
 	if w.wb != nil {
@@ -1421,12 +1452,21 @@ func (ws *worldServer) handleSimDay(w http.ResponseWriter, r *http.Request) {
 	}
 	results := []*sim.DayResult{}
 	// 独立 context：客户端断开（宿主 http_request 超时）不影响模拟继续完成
-	runCtx, runCancel := context.WithTimeout(context.Background(), time.Duration(req.Days)*170*time.Second)
+	turnTimeout, timeoutErr := inst.sim.TurnTimeout()
+	if timeoutErr != nil {
+		ws.agentConfigError(w, timeoutErr)
+		return
+	}
+	runCtx, runCancel := context.WithTimeout(context.Background(), time.Duration(req.Days)*turnTimeout)
 	defer runCancel()
 	for i := 0; i < req.Days; i++ {
+		beforeRevision := inst.engine.State().Revision
 		res, err := inst.sim.RunDay(runCtx)
 		if err != nil {
-			ws.writeJSON(w, 500, map[string]string{"error": "模拟失败: " + err.Error()})
+			if res != nil {
+				inst.lastDay = res
+			}
+			ws.writeJSON(w, 500, map[string]any{"ok": false, "error": "模拟失败: " + err.Error(), "world_committed": inst.engine.State().Revision > beforeRevision, "revision": inst.engine.State().Revision, "day": inst.engine.State().Day, "result": res})
 			return
 		}
 		inst.autoSnapshot() // 每7天自动存档（时间回退锚点）+ 风险前存档
@@ -1573,6 +1613,9 @@ func (ws *worldServer) handleSetLLM(w http.ResponseWriter, r *http.Request) {
 		inst.sim = sim.NewSimulator(inst.engine, inst.dir)
 	}
 	inst.applyLLM()
+	if req.Mode == "off" {
+		inst.sim.DisableLLM()
+	}
 	ws.writeJSON(w, 200, map[string]any{"ok": true, "mode": req.Mode, "llm_ready": inst.llm != nil})
 }
 
@@ -1970,6 +2013,25 @@ func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	inst.novelW.APICfg = latestCfg
+	inst.novelW.Independent = nil
+	_, agentSettings, _, _, settingsErr := ws.loadAgentView(inst)
+	if settingsErr != nil {
+		ws.agentConfigError(w, settingsErr)
+		return
+	}
+	var independentChronicle []sim.ChronicleEntry
+	if agentSettings.ExecutionMode == "independent" {
+		state, snapshotErr := inst.engine.Snapshot()
+		if snapshotErr != nil {
+			ws.agentConfigError(w, snapshotErr)
+			return
+		}
+		independentChronicle, settingsErr = inst.novelW.PrepareIndependentSources(inst.dir, state)
+		if settingsErr != nil {
+			ws.agentConfigError(w, settingsErr)
+			return
+		}
+	}
 	// 跨章记忆注入：未回收伏笔清单（模拟层账本→写手）+ 加载已有章节摘要（断点续写不丢记忆）
 	inst.novelW.Foreshadows = inst.sim.OpenForeshadows()
 	var req struct {
@@ -1985,7 +2047,12 @@ func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Reques
 	if req.ChapterLen != "" {
 		inst.novelW.ChapterLen = req.ChapterLen
 	}
-	if !req.Force {
+	if inst.novelW.Independent != nil {
+		if !inst.novelW.IndependentReady() {
+			ws.writeJSON(w, 409, map[string]any{"ok": false, "error": "当前视角尚未观察到至少两次已裁决的有效变化；独立模式不使用旧段落/张力阈值"})
+			return
+		}
+	} else if !req.Force {
 		readiness := inst.sim.Readiness()
 		if ready, _ := readiness["ready"].(bool); !ready {
 			ws.writeJSON(w, 409, map[string]any{
@@ -1998,6 +2065,9 @@ func (ws *worldServer) handleNovelGenerate(w http.ResponseWriter, r *http.Reques
 	}
 
 	chronicle := inst.sim.Chronicle()
+	if inst.novelW.Independent != nil {
+		chronicle = independentChronicle
+	}
 	if len(chronicle) == 0 {
 		ws.writeJSON(w, 400, map[string]any{"ok": false, "error": "编年史为空，先跑几天模拟（POST /api/world/sim/day）"})
 		return

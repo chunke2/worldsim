@@ -2,6 +2,8 @@ package sim
 
 import (
 	"fmt"
+	"worldsim/internal/characteragent"
+	"worldsim/internal/engine"
 )
 
 // ---------- 模拟就绪度（素材够不够写小说，不按天数，按剧情弧线完成度） ----------
@@ -13,6 +15,43 @@ import (
 // 满足即"可写"，天数只是世界时间戳，不是模拟目标。
 
 func (s *Simulator) Readiness() map[string]any {
+	if settings, _, enabled, err := s.independentSettings(); enabled || err != nil {
+		_ = settings
+		if err != nil {
+			return map[string]any{"ready": false, "mode": "independent", "reason": err.Error()}
+		}
+		state, err := s.engine.Snapshot()
+		if err != nil {
+			return map[string]any{"ready": false, "reason": err.Error()}
+		}
+		report, err := characteragent.AssessRuntime(s.worldDir, state)
+		if err != nil {
+			return map[string]any{"ready": false, "reason": err.Error()}
+		}
+		_, pov, err := engine.ResolveIdentity(state)
+		if err != nil {
+			return map[string]any{"ready": false, "reason": err.Error()}
+		}
+		projector, err := characteragent.NewVisibilityProjector(s.worldDir)
+		if err != nil {
+			return map[string]any{"ready": false, "reason": err.Error()}
+		}
+		packet, err := projector.Preview(pov)
+		if err != nil {
+			return map[string]any{"ready": false, "reason": err.Error()}
+		}
+		known := map[string]bool{}
+		for _, o := range packet.Observations {
+			known[o.EventID] = true
+		}
+		changes := 0
+		for _, turn := range report.Turns {
+			if len(turn.Changes) > 0 && known[turn.SourceID] {
+				changes++
+			}
+		}
+		return map[string]any{"ready": changes >= 2, "mode": "independent", "effective_turns": changes, "day": state.Day, "reason": fmt.Sprintf("当前视角已观察到%d次已裁决有效变化；最低要求2次，文学质量由章节审查评估", changes)}
+	}
 	arcsDone := 0
 	for _, a := range s.arcBook {
 		if a.Status == "done" {

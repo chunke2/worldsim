@@ -3,6 +3,7 @@
   import { currentWorld, worldState, loopInfo, toast } from '../lib/stores.js';
   import { request, jsonOptions, providerPatch, resolvedModel, agentSaveBody } from '../lib/agentSettings.js';
   import AgentModelPicker from './AgentModelPicker.svelte';
+  import AgentRuntimePanel from './AgentRuntimePanel.svelte';
 
   const tiers = [['core', '核心人物'], ['supporting', '重要配角'], ['background', '背景人物']];
   const world = $currentWorld; // Parent keys this panel by world; drafts cannot cross worlds.
@@ -94,11 +95,11 @@
       if (!alive) return;
       config = result.config; registryRevision = result.registry_revision;
       configSnapshot = JSON.stringify(config); validation = '';
-      toast('人物模型分配已保存；独立行动引擎尚未接入', 'success');
+      toast('人物模型与运行方式已保存', 'success');
     });
   }
   function reconcile() {
-    if (dirty && !window.confirm('同步人物后将重新读取，放弃未保存的人物设置？')) return;
+    if ((dirty || providerDirty) && !window.confirm('同步人物后将重新读取，放弃未保存设置？')) return;
     action(async () => {
       await request('/api/world/agents/reconcile', { world, ...jsonOptions('POST', {}) });
       await load(false);
@@ -111,17 +112,26 @@
     } else delete config.characters[id].model_override;
     config = config;
   }
+  function initializeCards() {
+    if (!window.confirm('为当前世界同一房间的五名活跃人物初始化死亡牌局？这会写入游戏规则和各自手牌，不调用模型，不能覆盖已初始化的场景。')) return;
+    action(async () => {
+      await request('/api/world/agents/scenario', { world, ...jsonOptions('POST', { kind: 'liars_room', lives: 1 }) });
+      await load(false);
+      toast('五人牌局已初始化；点击操作台推进回合才会调用角色模型', 'success');
+    });
+  }
   onMount(() => { load(false); });
   onDestroy(() => { alive = false; form.api_key = ''; });
 </script>
 
 <div class="space-y-5">
+  {#if world}<AgentRuntimePanel {world} />{/if}
   <div class="flex flex-wrap items-center gap-3">
     <h2 class="text-lg font-semibold">角色 Agent 与模型服务</h2>
     <button class="btn btn-sm" disabled={busy || loading} on:click={() => load()}>重新读取</button>
     {#if dirty || providerDirty}<span class="badge badge-warning">有未保存修改</span>{/if}
   </div>
-  <p class="text-sm">当前阶段负责按人物注册 Agent、分配模型和保存设置。角色独立观察、记忆与行动将在后续阶段接入；现有模拟仍使用兼容管线的模型设置。</p>
+  <p class="text-sm">选择“独立角色运行”后，推进世界会唤醒相关人物，各自使用自己的上下文与指定模型。旧世界默认保持兼容模式。每次只运行需要行动的人物；本页读取和保存不会自动调用模型。</p>
   {#if error}<div role="alert" class="alert {conflict ? 'alert-warning' : 'alert-error'} whitespace-pre-wrap">{error}</div>{/if}
   {#if loading}<p role="status">正在读取配置…</p>{:else}
     <section class="paper rounded-xl p-4 space-y-3">
@@ -145,7 +155,7 @@
             <label class="text-xs">服务并发上限（0 使用默认）<input type="number" min="0" step="1" class="input input-sm input-bordered w-full" bind:value={form.max_parallel} disabled={legacy} /></label>
             <label class="text-xs md:col-span-2">可用模型目录（每行一个，或逗号分隔）<textarea class="textarea textarea-bordered w-full" rows="2" bind:value={form.models} disabled={legacy}></textarea></label>
           </div>
-          <label class="flex gap-2 items-center text-xs"><input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.url_strict} />完整请求地址（不自动追加 /chat/completions）</label>
+          <label class="flex gap-2 items-center text-xs"><input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.url_strict} />保留地址中的 API 路径，仅补 /chat/completions（不自动插入 /v1）</label>
           <details><summary class="text-xs cursor-pointer">高级请求参数</summary>
             <label class="text-xs">extra_body（JSON 对象；留空保留，填写新对象替换）<textarea class="textarea textarea-bordered w-full font-mono" rows="2" bind:value={form.extra_body} placeholder={'例如 {"enable_thinking":false}'}></textarea></label>
           </details>
@@ -175,17 +185,26 @@
         {#if validation}<p class="text-sm text-warning">当前配置诊断：{validation}。修正服务和三档模型后保存。</p>{/if}
         {#if worldRunning}<p class="text-warning text-sm">后台模拟运行中；请停止并等待当前轮结束后保存人物设置。</p>{/if}
         <fieldset class="space-y-4" disabled={busy || worldRunning}>
+          <label class="text-sm">运行方式
+            <select class="select select-sm select-bordered w-full" bind:value={config.execution_mode}>
+              <option value="">旧版本兼容（默认）</option><option value="legacy">旧版本兼容</option><option value="independent">独立角色运行</option>
+            </select>
+          </label>
+          <p class="text-xs">独立模式使用下方人物模型；启用后再点击“推进”才产生请求。兼容管线的 off/mock 不会被当作角色真实模型。反思周期目前作为策略记录，不额外自动发起反思请求。</p>
+          {#if config.execution_mode === 'independent'}
+            <button class="btn btn-sm btn-outline" disabled={dirty || providerDirty || agents.filter(a => a.state === 'active').length !== 5} on:click={initializeCards}>初始化五人死亡牌局（零模型请求）</button>
+          {/if}
           {#each tiers as [tier, label]}
             <div class="border border-base-content/10 rounded-lg p-3 space-y-2">
               <h4 class="text-sm font-semibold">{label}</h4>
               <AgentModelPicker {providers} prefix={'tier-' + tier} bind:providerID={config.tiers[tier].provider_id} bind:model={config.tiers[tier].model} disabled={busy || worldRunning} />
-              <details><summary class="text-xs cursor-pointer">预算与唤醒策略（独立运行时接入后生效）</summary>
+              <details><summary class="text-xs cursor-pointer">独立运行预算与唤醒策略</summary>
                 <div class="grid grid-cols-2 gap-2 mt-2">
                   {#each [['max_tokens', '输出 Token 上限'], ['context_budget_tokens', '上下文 Token 预算'], ['max_parallel', '档位并发上限'], ['reflection_every', '每几轮反思']] as [key, title]}
                     <label class="text-xs">{title}（0 使用默认）<input type="number" min="0" step="1" class="input input-sm input-bordered w-full" bind:value={config.tiers[tier][key]} /></label>
                   {/each}
                   <label class="text-xs">温度（留空使用默认）<input type="number" min="0" max="2" step="0.1" class="input input-sm input-bordered w-full" bind:value={config.tiers[tier].temperature} /></label>
-                  <label class="text-xs">唤醒时机<select class="select select-sm select-bordered w-full" bind:value={config.tiers[tier].wake_policy}><option value="">默认</option><option value="every_relevant_turn">相关回合均唤醒</option><option value="on_involvement">参与事件时唤醒</option><option value="on_direct_event">直接受影响时唤醒</option></select></label>
+                  <label class="text-xs">唤醒时机<select class="select select-sm select-bordered w-full" bind:value={config.tiers[tier].wake_policy}><option value="">默认</option><option value="every_relevant_turn">相关回合均唤醒</option><option value="on_involvement">参与当前场景时唤醒</option><option value="on_direct_event">收到外部观察时唤醒</option></select></label>
                 </div>
               </details>
             </div>

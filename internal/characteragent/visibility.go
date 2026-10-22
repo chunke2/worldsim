@@ -86,6 +86,9 @@ func (p *VisibilityProjector) packetsLocked() (map[string]LocalObservationPacket
 			continue
 		}
 		for index, occurrence := range e.Occurrences {
+			if (occurrence.ContextSlot != "" && occurrence.ContextSlot != "game_state") || ((occurrence.ContextSlot != "" || occurrence.Persistent) && occurrence.Kind != "observation") {
+				return nil, report, bad
+			}
 			if !cognitionText(occurrence.Content) || !cognitionText(occurrence.Location) || len(occurrence.Audience) == 0 {
 				return nil, report, bad
 			}
@@ -117,6 +120,8 @@ func (p *VisibilityProjector) packetsLocked() (map[string]LocalObservationPacket
 				}
 				id := "obs-" + privateHash([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", d.WorldID, eventID, index, actor)))
 				observation := Observation{ID: id, Recipient: packet.Owner, Kind: kind, Text: occurrence.Content, EventID: eventID, SourceID: fmt.Sprintf("journal:%s:%d", privateHash(line), index), WorldRevision: e.Revision, Location: occurrence.Location}
+				observation.Persistent = occurrence.Persistent
+				observation.ContextSlot = occurrence.ContextSlot
 				if occurrence.Kind == "utterance" {
 					observation.Speaker = occurrence.Actor
 				}

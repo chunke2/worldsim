@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"worldsim/internal/characteragent"
+	"worldsim/internal/config"
 	"worldsim/internal/engine"
 	"worldsim/internal/llm"
 	"worldsim/internal/logging"
@@ -23,6 +25,9 @@ import (
 // MVP 阶段：agents 用 dry-run 模板（确定性、零 LLM），验证数据流与状态机；
 // 后续把 Agent 换成 LLMAgent（包装 internal/llm）即可接入真实决策。
 type Simulator struct {
+	characterClient    characteragent.CompletionClient
+	characterProviders *config.ProviderRegistry
+	modelMode          string
 	engine             *engine.StateEngine
 	worldDir           string
 	worldName          string // 世界名（日志归属，从 worldDir 推导）
@@ -56,10 +61,22 @@ type Simulator struct {
 // EnableLLM 启用 LLM Agent（配置后主角/世界/事件用真实决策）
 func (s *Simulator) EnableLLM(c *LLMClient) {
 	s.llm = c
+	s.modelMode = "real"
+	if c != nil && c.Mock != nil {
+		s.modelMode = "mock"
+	}
 	if s.mem != nil {
 		s.mem.SetCompressor(c) // 记忆压缩用 LLM（月度摘要）
 	}
 }
+
+func (s *Simulator) ClearLegacyLLM() {
+	s.llm = nil
+	if s.mem != nil {
+		s.mem.SetCompressor(nil)
+	}
+}
+func (s *Simulator) DisableLLM() { s.ClearLegacyLLM(); s.modelMode = "off" }
 
 // SetWorldbook 设置世界书（§3.3/§4.5：各 Agent 按分层注入）
 func (s *Simulator) SetWorldbook(wb *worldbook.Worldbook) { s.wb = wb }

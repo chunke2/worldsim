@@ -153,7 +153,7 @@ func TestRouterRejectsOverridesAndRedactsRemoteErrors(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); http.Error(w, "API-PRIVATE-CANARY", 500) }))
 	defer server.Close()
-	for _, extra := range []map[string]any{nil, {"messages": []any{"OTHER-PRIVATE-CANARY"}}, {"model": "wrong"}, {"tools": []any{}}} {
+	for _, extra := range []map[string]any{nil, {"messages": []any{"OTHER-PRIVATE-CANARY"}}, {"model": "wrong"}, {"tools": []any{}}, {"previous_response_id": "shared"}, {"conversation_id": "shared"}, {"thread_id": "shared"}, {"session_id": "shared"}} {
 		providers := config.ProviderRegistry{Providers: map[string]config.Provider{"p": {Name: "P", Protocol: "openai_compatible", BaseURL: server.URL, APIKey: "API-PRIVATE-CANARY", ExtraBody: extra}}}
 		router, _ := NewModelRouter(dir, providers)
 		a, _ := NewCharacterAgent(dir, "沈砚", router)

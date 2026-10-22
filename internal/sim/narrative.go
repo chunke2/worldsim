@@ -14,6 +14,11 @@ import (
 // RunDay performs the narrative guard before any model call. Assessment is a
 // conservative evidence check, not a claim that a quiet scene has no value.
 func (s *Simulator) RunDay(ctx context.Context) (result *DayResult, resultErr error) {
+	if _, _, enabled, err := s.independentSettings(); err != nil {
+		return nil, err
+	} else if enabled {
+		return s.runIndependentDay(ctx)
+	}
 	if err := s.ReconcileCharacterAgents(); err != nil {
 		return nil, fmt.Errorf("角色 Agent 注册失败: %w", err)
 	}

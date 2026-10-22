@@ -30,6 +30,7 @@ type WorldState struct {
 	Entities   map[string]Entity `json:"entities"`
 }
 type WorldLevel struct {
+	Runtime         map[string]any      `json:"runtime,omitempty"` // Deterministic independent-agent scene/game state.
 	Protagonist     string              `json:"protagonist,omitempty"`
 	NarrativePOV    string              `json:"narrative_pov,omitempty"`
 	GlobalEvents    []string            `json:"global_events"`
@@ -117,11 +118,13 @@ type LogEntry struct {
 
 // Occurrence records observable evidence; a claim made in speech is not a true fact.
 type Occurrence struct {
-	Kind     string   `json:"kind"` // observation | utterance
-	Content  string   `json:"content"`
-	Actor    string   `json:"actor"`
-	Audience []string `json:"audience"`
-	Location string   `json:"location"`
+	ContextSlot string   `json:"context_slot,omitempty"` // Trusted latest-state frame.
+	Persistent  bool     `json:"persistent,omitempty"`   // Durable local rule evidence chosen by the trusted runtime.
+	Kind        string   `json:"kind"`                   // observation | utterance
+	Content     string   `json:"content"`
+	Actor       string   `json:"actor"`
+	Audience    []string `json:"audience"`
+	Location    string   `json:"location"`
 }
 
 // ---------- 软规则回调：由世界 Agent（GM）实现 ----------
@@ -402,6 +405,25 @@ func (e *StateEngine) Load(path string) error {
 		return err
 	}
 	return json.Unmarshal(b, e.state)
+}
+
+// RecoverCommittedJournal explicitly replays a durable tail after a snapshot
+// save failure. Independent mode calls this; legacy loading is unchanged.
+func (e *StateEngine) RecoverCommittedJournal() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.logPath == "" {
+		return nil
+	}
+	state, err := Replay(e.logPath, int(^uint(0)>>1), e.state)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("committed journal recovery failed; preserve files")
+	}
+	*e.state = *state
+	return nil
 }
 
 // Replay 事件溯源重放：从 event_log 重放到目标 revision（§17.1）
@@ -693,6 +715,19 @@ func applyWorldLevel(s *WorldState, rest []string, c Change) error {
 		return fmt.Errorf("world_level 路径过短")
 	}
 	switch rest[0] {
+	case "runtime":
+		if len(rest) != 1 || c.Op != "set" {
+			return fmt.Errorf("runtime requires whole-state set")
+		}
+		b, err := json.Marshal(c.Value)
+		if err != nil {
+			return fmt.Errorf("invalid runtime state")
+		}
+		var runtime map[string]any
+		if err := json.Unmarshal(b, &runtime); err != nil || runtime == nil {
+			return fmt.Errorf("runtime requires an object")
+		}
+		s.WorldLevel.Runtime = runtime
 	case "day":
 		day, ok := toFloat(c.Value)
 		if !ok || c.Op != "set" || day < float64(s.Day) || day != float64(int(day)) {

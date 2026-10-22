@@ -38,6 +38,8 @@ try {
     tiers: Object.fromEntries(['core', 'supporting', 'background'].map(t => [t, { provider_id: 'a', model: 'strong', max_tokens: 4000 }])),
     characters: Object.fromEntries(['A', 'B', 'C', 'D', 'E'].map(id => [id, { importance: 'core' }])) });
   let config = initial();
+  let scene = { initialized: false };
+  const runtimeRows = () => Object.keys(config.characters).map(character_id => ({ character_id, state: 'active', observations: 3, thoughts: 1, latest_observations: 2, prompt_tokens: 100, completion_tokens: 30, last_action: 'wait' }));
   await page.route('**/*', async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.origin !== base) return route.abort();
@@ -69,7 +71,11 @@ try {
         else { config = req.postDataJSON().config; config.revision++; }
       }
       if (status === 200) body = { ok: true, config, registry_revision: 3, validation_error: '' };
-    } else if (p === '/api/world/agents') body = { ok: true, registry_revision: 3, config_revision: config.revision, agents: Object.keys(config.characters).map(character_id => ({ character_id, state: character_id === 'E' ? 'dormant' : 'active', autonomous_runtime: false })) };
+    } else if (p === '/api/world/agents/runtime') body = { ok: true, scene, agents: runtimeRows(), world_revision: 4, diagnostics: {}, last_event_id: 'event:4:test' };
+    else if (p.endsWith('/cognition')) body = { ok: true, cognition: { owner: { character_id: 'A' }, records: [{ text: 'OPERATOR-ONLY-PRIVATE-MEMORY' }] } };
+    else if (p.endsWith('/audit')) body = { ok: true, audit: [{ status: 'received' }] };
+    else if (p === '/api/world/agents/pressures') { assert.equal(method, 'POST'); body = { ok: true, model_calls: 0 }; }
+    else if (p === '/api/world/agents') body = { ok: true, registry_revision: 3, config_revision: config.revision, agents: Object.keys(config.characters).map(character_id => ({ character_id, state: character_id === 'E' ? 'dormant' : 'active', autonomous_runtime: false })) };
     await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
   });
   await page.goto(base);
@@ -78,6 +84,13 @@ try {
   await page.getByText('共 5 个 Agent', { exact: false }).waitFor();
   assert.equal(writes.length, 0, 'opening config must be read only');
   assert.equal(tests.length, 0);
+  assert.equal(await page.getByText('OPERATOR-ONLY-PRIVATE-MEMORY').count(), 0);
+  await page.getByRole('button', { name: '私人认知', exact: true }).first().click();
+  await page.getByText('OPERATOR-ONLY-PRIVATE-MEMORY', { exact: false }).waitFor();
+  const inspection = page.getByRole('region', { name: '独立角色运行观察' });
+  await inspection.getByRole('button', { name: '关闭', exact: true }).click();
+  assert.equal(await page.getByText('OPERATOR-ONLY-PRIVATE-MEMORY').count(), 0);
+  await page.getByLabel('运行方式', { exact: false }).selectOption('independent');
   const card = id => page.locator('strong').filter({ hasText: new RegExp(`^${id}$`) }).locator('../..');
   await card('D').getByRole('combobox').selectOption('supporting');
   await card('D').getByRole('checkbox').check();
@@ -92,9 +105,26 @@ try {
   assert.deepEqual(saved.body.config.characters.D.model_override, { provider_id: 'b', model: 'cheap' });
   assert.ok(saved.body.config.characters.E, 'dormant actors retained');
   assert.equal(saved.body.config.tiers.core.max_tokens, 4000);
+  assert.equal(saved.body.config.execution_mode, 'independent');
+
+  // Runtime polling must not replace an in-progress configuration draft.
+  scene = { initialized: true, kind: 'free', turn: 3, stalled: true, stalled_turns: 3, actors: ['A', 'B', 'C', 'D', 'E'], last_outcomes: [{ actor_id: 'A', action: 'wait', accepted: true }] };
+  await page.getByRole('button', { name: '刷新运行状态', exact: true }).click();
+  await page.getByText('已暂停重复生成', { exact: false }).waitFor();
+  await page.getByText('添加可追溯的环境条件', { exact: true }).click();
+  await page.getByLabel('角色能观察到的条件', { exact: false }).fill('公开计时器亮起');
+  await page.getByLabel('作者理由', { exact: false }).fill('基于当前停滞事件提供新线索');
+  await page.getByRole('button', { name: '确认环境条件', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('textarea[placeholder^="描述环境变化"]')?.value === '');
+  const pressure = writes.find(w => w.path === '/api/world/agents/pressures');
+  assert.equal(pressure.world, world);
+  assert.equal(pressure.body.source_id, 'event:4:test');
+  assert.deepEqual(pressure.body.actors, ['A', 'B', 'C', 'D', 'E']);
 
   conflict = true;
   await card('A').getByRole('combobox').selectOption('background');
+  await page.getByRole('button', { name: '刷新运行状态', exact: true }).click();
+  assert.equal(await card('A').getByRole('combobox').inputValue(), 'background');
   await page.getByRole('button', { name: '保存三档与全部人物设置' }).click();
   await page.getByRole('alert').filter({ hasText: '草稿已保留' }).waitFor();
   assert.equal(await card('A').getByRole('combobox').inputValue(), 'background');
