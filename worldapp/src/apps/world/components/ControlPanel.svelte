@@ -1,18 +1,30 @@
 <script>
-  import { j, MODELS } from '../lib/api.js';
-  import { heroName, currentWorld, refreshAll, toast, lastResult } from '../lib/stores.js';
+  import { onMount } from 'svelte';
+  import { j } from '../lib/api.js';
+  import { heroName, currentWorld, refreshAll, toast, lastResult, activeTab, loopInfo } from '../lib/stores.js';
   import PauseModal from './PauseModal.svelte';
 
   let pauseModal;
 
   let hero = '';
   let llmMode = 'real';
-  let baseUrl = 'https://tokenrhythm.studio/v1';
-  let modelName = 'deepseek-v4-flash';
+  let baseUrl = '';
+  let modelName = '';
   let apiKey = '';
-  let tierFast = 'deepseek-v4-flash-0731';
-  let tierNormal = 'deepseek-v4-pro';
-  let tierPremium = 'deepseek-v4-pro';
+  let tierFast = '', tierNormal = '', tierPremium = '';
+  let apiRevision = '', hasKey = false, configLoaded = false;
+  async function loadLegacyConfig() {
+    const d = await j('/api/novel/config/api');
+    if (!d.revision) { toast('无法读取已保存模型配置，请重试', 'error'); return; }
+    baseUrl = d.base_url || ''; modelName = d.model || '';
+    tierFast = d.model_tiers?.fast || modelName;
+    tierNormal = d.model_tiers?.normal || modelName;
+    tierPremium = d.model_tiers?.premium || modelName;
+    apiRevision = d.revision; hasKey = !!d.has_api_key; configLoaded = true;
+    apiKey = '';
+  }
+  onMount(() => { loadLegacyConfig(); });
+  $: if ($loopInfo) applyLoop($loopInfo);
   let daysNum = 1;
   let simMode = 'auto';
   let loopDays = 1000;
@@ -41,6 +53,7 @@
   async function setLLM() {
     const body = { mode: llmMode };
     if (llmMode === 'real') {
+      body.revision = apiRevision;
       body.base_url = baseUrl.trim();
       body.model = modelName.trim();
       body.api_key = apiKey.trim();
@@ -51,7 +64,11 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    if (d.ok) toast('LLM 模式：' + llmMode + ' · 分层已生效', 'success');
+    if (d.ok) {
+      apiKey = '';
+      toast('兼容管线 LLM 模式：' + llmMode, 'success');
+      if (llmMode === 'real') await loadLegacyConfig();
+    }
     else toast('失败：' + (d.error || ''), 'error');
   }
 
@@ -95,6 +112,10 @@
   async function fetchLoop() {
     const d = await j('/api/world/loop');
     if (!d || d.running === undefined) return;
+    loopInfo.set(d);
+  }
+
+  function applyLoop(d) {
     loopRunning = d.running;
     if (d.running) {
       loopProgress = Math.min(100, Math.round((d.day / (d.target_day || 1)) * 100));
@@ -117,6 +138,9 @@
     <span class="badge badge-outline badge-xs">{ $currentWorld || '未选择世界' }</span>
   </div>
 
+  <button class="btn btn-sm btn-outline w-full" on:click={() => activeTab.set('agents')}>API 服务 / 角色 Agent 设置</button>
+  <p class="text-[11px] text-base-content/60">三档人物模型在上方设置；下方为当前模拟使用的兼容管线。</p>
+
   <div>
     <label class="label py-0 text-xs text-base-content/60">主角名</label>
     <div class="flex gap-2">
@@ -133,7 +157,7 @@
         <option value="mock">mock · 本地模拟</option>
         <option value="off">off · 模板</option>
       </select>
-      <button class="btn btn-ghost btn-sm" on:click={setLLM}>应用</button>
+      <button class="btn btn-ghost btn-sm" on:click={setLLM} disabled={running || loopRunning || (llmMode === 'real' && !configLoaded)}>应用</button>
     </div>
   </div>
 
@@ -141,25 +165,20 @@
   <div class="space-y-1.5">
     <input class="input input-sm input-bordered w-full" placeholder="Base URL" bind:value={baseUrl} />
     <input class="input input-sm input-bordered w-full" placeholder="模型" bind:value={modelName} />
-    <input class="input input-sm input-bordered w-full" placeholder="API Key" type="password" bind:value={apiKey} />
+    <input class="input input-sm input-bordered w-full" placeholder={hasKey ? 'API Key 已保存；留空保留' : 'API Key'} type="password" bind:value={apiKey} />
+    <button class="btn btn-ghost btn-xs" on:click={loadLegacyConfig}>重新读取已保存配置</button>
     <div class="text-xs text-base-content/50 pt-1">🧠 模型分层（各司其职）</div>
     <div class="flex items-center gap-1.5">
       <span class="text-xs text-base-content/50 w-14 shrink-0">⚡ 高频</span>
-      <select class="select select-xs select-bordered flex-1" bind:value={tierFast}>
-        {#each MODELS as m}<option value={m}>{m}</option>{/each}
-      </select>
+      <input aria-label="兼容管线高频模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierFast} />
     </div>
     <div class="flex items-center gap-1.5">
       <span class="text-xs text-base-content/50 w-14 shrink-0">🔷 推理</span>
-      <select class="select select-xs select-bordered flex-1" bind:value={tierNormal}>
-        {#each MODELS as m}<option value={m}>{m}</option>{/each}
-      </select>
+      <input aria-label="兼容管线推理模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierNormal} />
     </div>
     <div class="flex items-center gap-1.5">
       <span class="text-xs text-base-content/50 w-14 shrink-0">💎 产出</span>
-      <select class="select select-xs select-bordered flex-1" bind:value={tierPremium}>
-        {#each MODELS as m}<option value={m}>{m}</option>{/each}
-      </select>
+      <input aria-label="兼容管线产出模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierPremium} />
     </div>
     <div class="text-[10px] text-base-content/40">⚡事件/NPC · 🔷主角/GM/反思 · 💎小说/抉择</div>
   </div>

@@ -98,6 +98,29 @@ func TestAgentGETDoesNotInitializeOrWrite(t *testing.T) {
 	}
 }
 
+func TestAgentPanelWorldBindingRejectsStaleDraft(t *testing.T) {
+	ws, mux := agentAPIFixture(t, true)
+	update := readAgentConfig(t, mux)
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/api/world/agents"},
+		{"GET", "/api/world/agents/config"},
+		{"PUT", "/api/world/agents/config"},
+		{"PUT", "/api/world/agents/A"},
+		{"POST", "/api/world/agents/reconcile"},
+	} {
+		w := callAgentAPI(t, mux, tc.method, tc.path+"?world=previous-world", update)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("stale panel %s: %d %s", tc.path, w.Code, w.Body.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(ws.inst().dir, characteragent.RuntimeConfigFile)); !os.IsNotExist(err) {
+		t.Fatal("stale panel wrote the active world")
+	}
+	if w := callAgentAPI(t, mux, "PUT", "/api/world/agents/config?world=test", update); w.Code != 200 {
+		t.Fatalf("correct world draft rejected: %s", w.Body.String())
+	}
+}
+
 func TestAgentConfigCASAndIndividualModelOverride(t *testing.T) {
 	ws, mux := agentAPIFixture(t, true)
 	u := readAgentConfig(t, mux)

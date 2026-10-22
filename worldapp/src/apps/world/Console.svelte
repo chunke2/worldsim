@@ -5,6 +5,7 @@
 
   import WorldHeader from './components/WorldHeader.svelte';
   import ControlPanel from './components/ControlPanel.svelte';
+  import AgentSettingsPanel from './components/AgentSettingsPanel.svelte';
   import WorldStatePanel from './components/WorldStatePanel.svelte';
   import GlobalEventsPanel from './components/GlobalEventsPanel.svelte';
   import ChroniclePanel from './components/ChroniclePanel.svelte';
@@ -60,9 +61,9 @@
     loopInfo.set(d);
   }
 
-  onMount(async () => {
+  onMount(() => {
     window.addEventListener('ws:create-world', onCreateWorld);
-    await Promise.all([loadWorlds(), loadState(), loadLoop()]);
+    Promise.all([loadWorlds(), loadState(), loadLoop()]);
     const timer = setInterval(() => {
       if (!document.hidden) {
         loadWorlds();
@@ -102,6 +103,7 @@
           ['novel', '📖', '小说'],
           ['memory', '🧠', '记忆'],
           ['entities', '🧍', '实体'],
+          ['agents', '⚙', '角色 Agent'],
           ['worldbook', '📚', '世界书'],
           ['art', '🎨', '美术工坊'],
           ['card', '🃏', '世界卡'],
@@ -129,6 +131,8 @@
           <MemoryPanel />
         {:else if $activeTab === 'entities'}
           <EntitiesPanel />
+        {:else if $activeTab === 'agents'}
+          {#key $currentWorld}<AgentSettingsPanel />{/key}
         {:else if $activeTab === 'worldbook'}
           <WorldbookPanel />
         {:else if $activeTab === 'stats'}

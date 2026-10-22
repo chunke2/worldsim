@@ -28,6 +28,8 @@
       body: JSON.stringify({ world: name })
     });
     if (d.ok) {
+      currentWorld.set(name);
+      worldState.set(null);
       toast('已切换世界：' + name, 'success');
       refreshAll();
     } else {

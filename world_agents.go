@@ -45,6 +45,21 @@ func (ws *worldServer) agentConfigError(w http.ResponseWriter, err error) {
 
 func (ws *worldServer) apiConfigPath() string { return filepath.Join(ws.baseDir, "..", "api.json") }
 
+// Bind requests from configuration panels to the world whose draft they loaded.
+// Resolve once so a later global selection change cannot redirect a write.
+func (ws *worldServer) agentWorld(w http.ResponseWriter, r *http.Request) *worldInstance {
+	inst := ws.inst()
+	if inst == nil {
+		ws.writeJSON(w, 400, map[string]any{"error": "没有可用世界"})
+		return nil
+	}
+	if expected := r.URL.Query().Get("world"); expected != "" && expected != inst.name {
+		ws.writeJSON(w, http.StatusConflict, map[string]any{"error": "世界已切换，请重新读取人物配置"})
+		return nil
+	}
+	return inst
+}
+
 func defaultAgentConfig(c *config.APIConfig) config.AgentRuntimeConfig {
 	result := config.AgentRuntimeConfig{SchemaVersion: 1, Tiers: map[config.AgentImportance]config.TierPolicy{}, Characters: map[string]config.CharacterAgentConfig{}}
 	for tier, modelTier := range map[config.AgentImportance]string{config.ImportanceCore: "premium", config.ImportanceSupporting: "normal", config.ImportanceBackground: "fast"} {
@@ -78,9 +93,8 @@ func (ws *worldServer) loadAgentView(inst *worldInstance) (*characteragent.Agent
 }
 
 func (ws *worldServer) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
-	inst := ws.inst()
+	inst := ws.agentWorld(w, r)
 	if inst == nil {
-		ws.writeJSON(w, 400, map[string]any{"error": "没有可用世界"})
 		return
 	}
 	_, c, d, api, err := ws.loadAgentView(inst)
@@ -96,9 +110,8 @@ func (ws *worldServer) handleAgentConfigGet(w http.ResponseWriter, r *http.Reque
 }
 
 func (ws *worldServer) handleAgentsGet(w http.ResponseWriter, r *http.Request) {
-	inst := ws.inst()
+	inst := ws.agentWorld(w, r)
 	if inst == nil {
-		ws.writeJSON(w, 400, map[string]any{"error": "没有可用世界"})
 		return
 	}
 	_, c, d, api, err := ws.loadAgentView(inst)
@@ -141,9 +154,8 @@ func (ws *worldServer) handleAgentPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ws *worldServer) saveAgentConfig(w http.ResponseWriter, r *http.Request, individual bool) {
-	inst := ws.inst()
+	inst := ws.agentWorld(w, r)
 	if inst == nil {
-		ws.writeJSON(w, 400, map[string]any{"error": "没有可用世界"})
 		return
 	}
 	end, err := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
@@ -207,9 +219,8 @@ func (ws *worldServer) saveAgentConfig(w http.ResponseWriter, r *http.Request, i
 }
 
 func (ws *worldServer) handleAgentsReconcile(w http.ResponseWriter, r *http.Request) {
-	inst := ws.inst()
+	inst := ws.agentWorld(w, r)
 	if inst == nil {
-		ws.writeJSON(w, 400, map[string]any{"error": "没有可用世界"})
 		return
 	}
 	end, err := config.BeginWorldActivity(filepath.Dir(ws.baseDir), inst.dir)
