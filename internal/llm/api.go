@@ -131,6 +131,11 @@ func resolveChatCompletionsURL(base string, strict bool) string {
 	return base + "/v1/chat/completions"
 }
 
+// ResolveChatCompletionsURL shares endpoint semantics with isolated runtimes.
+func ResolveChatCompletionsURL(base string, strict bool) string {
+	return resolveChatCompletionsURL(base, strict)
+}
+
 func resolveAPIBase(base string, strict bool) string {
 	u := resolveChatCompletionsURL(base, strict)
 	return strings.TrimSuffix(u, "/chat/completions")

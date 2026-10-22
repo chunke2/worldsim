@@ -61,6 +61,7 @@ type CognitionState struct {
 	Revision      int               `json:"revision"`
 	Observations  []Observation     `json:"observations"`
 	Records       []CognitionRecord `json:"records"`
+	Thoughts      []ThoughtReceipt  `json:"thoughts,omitempty"`
 }
 
 // CurrentRecords excludes superseded records but retains terminal statuses.
@@ -207,7 +208,7 @@ func validateCognition(d CognitionState, owner CognitionOwner) error {
 		}
 		seen[r.ID], previous[r.ID] = r.AddedRevision, r
 	}
-	return nil
+	return validateThoughtReceipts(d)
 }
 
 func (s *CognitionStore) validateLocked(state CognitionState) error {
@@ -296,6 +297,10 @@ func (s *CognitionStore) appendLocked(expectedRevision int, observations []Obser
 		r.AddedRevision = d.Revision
 		d.Records = append(d.Records, r)
 	}
+	return s.publishLocked(d)
+}
+
+func (s *CognitionStore) publishLocked(d CognitionState) (CognitionState, error) {
 	if err := s.validateLocked(d); err != nil {
 		return CognitionState{}, err
 	}
