@@ -51,7 +51,7 @@ try {
     else if (p === '/api/worlds/select') { world = req.postDataJSON().world; config = initial(); body = { ok: true }; }
     else if (p === '/api/world/state') body = { day: 1, revision: 1, entities: {}, world_level: {} };
     else if (p === '/api/world/loop') body = { running: false };
-    else if (p === '/api/novel/config/api') body = { revision: 'legacy', has_api_key: true, base_url: 'https://a.example/v1', model: 'strong' };
+    else if (p === '/api/novel/config/api') body = { revision: 'legacy', has_api_key: true, base_url: 'https://a.example/v1', model: 'strong', models: ['strong', 'cheap'], model_tiers: { fast: 'cheap', normal: 'strong', premium: 'strong' } };
     else if (p === '/api/llm/providers') {
       if (method === 'PUT') {
         const u = req.postDataJSON();
@@ -80,6 +80,8 @@ try {
   });
   await page.goto(base);
   await page.getByTitle('世界模拟 （右键删除书签）').click();
+  assert.equal(await page.getByLabel('兼容管线高频模型').evaluate(el => el.tagName), 'SELECT');
+  assert.deepEqual(await page.getByLabel('兼容管线高频模型').locator('option').allTextContents(), ['strong', 'cheap']);
   await page.getByRole('button', { name: 'API 服务 / 角色 Agent 设置', exact: true }).click();
   await page.getByText('共 5 个 Agent', { exact: false }).waitFor();
   assert.equal(writes.length, 0, 'opening config must be read only');
@@ -95,7 +97,7 @@ try {
   await card('D').getByRole('combobox').selectOption('supporting');
   await card('D').getByRole('checkbox').check();
   await card('D').getByLabel(/^API 服务/).selectOption('b');
-  await card('D').getByLabel('模型名称', { exact: true }).fill('cheap');
+  await card('D').getByLabel('模型名称', { exact: false }).selectOption('cheap');
   await page.getByRole('button', { name: '保存三档与全部人物设置' }).click();
   await page.getByText('配置版本 1', { exact: false }).waitFor();
   const saved = writes.find(w => w.path === '/api/world/agents/config');

@@ -12,6 +12,10 @@
   let modelName = '';
   let apiKey = '';
   let tierFast = '', tierNormal = '', tierPremium = '';
+  let modelOptions = [];
+  function modelChoices(current) {
+    return current && !modelOptions.includes(current) ? [current, ...modelOptions] : modelOptions;
+  }
   let apiRevision = '', hasKey = false, configLoaded = false;
   async function loadLegacyConfig() {
     const d = await j('/api/novel/config/api');
@@ -20,6 +24,7 @@
     tierFast = d.model_tiers?.fast || modelName;
     tierNormal = d.model_tiers?.normal || modelName;
     tierPremium = d.model_tiers?.premium || modelName;
+    modelOptions = d.models || [];
     apiRevision = d.revision; hasKey = !!d.has_api_key; configLoaded = true;
     apiKey = '';
   }
@@ -164,21 +169,27 @@
   {#if llmMode === 'real'}
   <div class="space-y-1.5">
     <input class="input input-sm input-bordered w-full" placeholder="Base URL" bind:value={baseUrl} />
-    <input class="input input-sm input-bordered w-full" placeholder="模型" bind:value={modelName} />
+    {#if modelOptions.length}
+      <select aria-label="兼容管线默认模型" class="select select-sm select-bordered w-full" bind:value={modelName}>
+        {#each modelChoices(modelName) as option}<option value={option}>{option}</option>{/each}
+      </select>
+    {:else}
+      <input class="input input-sm input-bordered w-full" placeholder="模型（服务未配置目录，请手填）" bind:value={modelName} />
+    {/if}
     <input class="input input-sm input-bordered w-full" placeholder={hasKey ? 'API Key 已保存；留空保留' : 'API Key'} type="password" bind:value={apiKey} />
     <button class="btn btn-ghost btn-xs" on:click={loadLegacyConfig}>重新读取已保存配置</button>
     <div class="text-xs text-base-content/50 pt-1">🧠 模型分层（各司其职）</div>
     <div class="flex items-center gap-1.5">
       <span class="text-xs text-base-content/50 w-14 shrink-0">⚡ 高频</span>
-      <input aria-label="兼容管线高频模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierFast} />
+      {#if modelOptions.length}<select aria-label="兼容管线高频模型" class="select select-xs select-bordered flex-1 min-w-0" bind:value={tierFast}>{#each modelChoices(tierFast) as option}<option value={option}>{option}</option>{/each}</select>{:else}<input aria-label="兼容管线高频模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierFast} />{/if}
     </div>
     <div class="flex items-center gap-1.5">
       <span class="text-xs text-base-content/50 w-14 shrink-0">🔷 推理</span>
-      <input aria-label="兼容管线推理模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierNormal} />
+      {#if modelOptions.length}<select aria-label="兼容管线推理模型" class="select select-xs select-bordered flex-1 min-w-0" bind:value={tierNormal}>{#each modelChoices(tierNormal) as option}<option value={option}>{option}</option>{/each}</select>{:else}<input aria-label="兼容管线推理模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierNormal} />{/if}
     </div>
     <div class="flex items-center gap-1.5">
       <span class="text-xs text-base-content/50 w-14 shrink-0">💎 产出</span>
-      <input aria-label="兼容管线产出模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierPremium} />
+      {#if modelOptions.length}<select aria-label="兼容管线产出模型" class="select select-xs select-bordered flex-1 min-w-0" bind:value={tierPremium}>{#each modelChoices(tierPremium) as option}<option value={option}>{option}</option>{/each}</select>{:else}<input aria-label="兼容管线产出模型" class="input input-xs input-bordered flex-1 min-w-0" bind:value={tierPremium} />{/if}
     </div>
     <div class="text-[10px] text-base-content/40">⚡事件/NPC · 🔷主角/GM/反思 · 💎小说/抉择</div>
   </div>

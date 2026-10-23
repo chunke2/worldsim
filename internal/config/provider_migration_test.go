@@ -11,7 +11,7 @@ import (
 
 func TestLegacyProviderMigrationDoesNotRewriteSource(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "api.json")
-	source := []byte(`{"base_url":"https://old.example/v1","api_key":"KEY-CANARY","model":"old","max_tokens":9000,"extra_body":{"thinking":false}}`)
+	source := []byte(`{"base_url":"https://old.example/v1","api_key":"KEY-CANARY","model":"old","models":["cheap","strong"],"max_tokens":9000,"extra_body":{"thinking":false}}`)
 	if err := os.WriteFile(path, source, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +26,9 @@ func TestLegacyProviderMigrationDoesNotRewriteSource(t *testing.T) {
 	if cfg.DefaultProvider != LegacyProviderID || cfg.Providers[LegacyProviderID].APIKey != "KEY-CANARY" {
 		t.Fatal("legacy migration lost provider/key")
 	}
+	if got := cfg.Providers[LegacyProviderID].Models; len(got) != 2 || got[0] != "cheap" || got[1] != "strong" {
+		t.Fatal("legacy migration lost selectable model catalog")
+	}
 	next, err := MergeAPIConfig(cfg, []byte(`{"model":"new","api_key":""}`))
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +42,19 @@ func TestLegacyProviderMigrationDoesNotRewriteSource(t *testing.T) {
 	reloaded, err := LoadAPIConfig(path)
 	if err != nil || reloaded.Providers[LegacyProviderID].APIKey != next.APIKey {
 		t.Fatal("migration round trip failed")
+	}
+}
+
+func TestCompatibilityModelCatalogRejectsAmbiguousEntries(t *testing.T) {
+	base := &APIConfig{BaseURL: "https://api.example", Model: "cheap"}
+	for _, patch := range []string{
+		`{"models":["cheap","cheap"]}`,
+		`{"models":[" cheap"]}`,
+		`{"models":[""]}`,
+	} {
+		if _, err := MergeAPIConfig(base, []byte(patch)); err == nil {
+			t.Fatalf("accepted invalid model catalog: %s", patch)
+		}
 	}
 }
 

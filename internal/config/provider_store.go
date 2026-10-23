@@ -80,7 +80,7 @@ func UpdateProviders(path string, update ProviderUpdate) (*APIConfig, error) {
 		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 			return nil, fmt.Errorf("invalid compatibility provider")
 		}
-		for src, dst := range map[string]string{"base_url": "base_url", "api_key": "api_key", "clear_api_key": "clear_api_key", "timeout_seconds": "http_timeout_seconds", "url_strict": "url_strict", "extra_body": "extra_body"} {
+		for src, dst := range map[string]string{"base_url": "base_url", "api_key": "api_key", "clear_api_key": "clear_api_key", "timeout_seconds": "http_timeout_seconds", "url_strict": "url_strict", "extra_body": "extra_body", "models": "models"} {
 			if value, ok := fields[src]; ok {
 				patch[dst] = value
 			}

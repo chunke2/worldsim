@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "theme": "当规则只允许一个人活下去时，程序是否能免除个人对选择后果的责任",
+  "reader_promise": "所有决定胜负的牌面、宣言、接受、质疑和生命变化都有可回查来源；结局来自人物选择与信息博弈，不临时更改规则。",
+  "current_tension": 0.72,
+  "current_risk": "第一位行动者即将出牌；第一句宣言会成为其余四人判断真假的初始基线。",
+  "costs": [
+    "错误质疑或被识破谎言会永久失去唯一生命",
+    "公开自己的判断方法会换取短期信任，也会暴露后续策略",
+    "保护弱者、维持盟约或坚持程序都可能直接降低自己的生存机会"
+  ],
+  "information_gaps": [
+    "沈砚不知道其他四人的手牌和私有判断",
+    "五人不知道彼此过去曾如何利用或服从程序",
+    "读者只能知道沈砚观察到的行为、公开陈述和已揭示牌面",
+    "任何尚未翻开的牌都不能提前进入读者信息"
+  ],
+  "randomness_boundary": "发牌结果一经写入权威事实便不可修改；随机性不能逆向改变已经发出或翻开的牌。",
+  "threads": [
+    {
+      "id": "main-last-survivor",
+      "kind": "question",
+      "scope": "main",
+      "description": "谁会成为唯一存活者，他的胜利建立在怎样的判断、欺骗和代价上？",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["沈砚", "罗绮", "顾闻", "叶晴", "程野"],
+      "next_condition": "完成第一手宣言，并让下一位作出接受或质疑的明确选择。",
+      "due_chapter": 10
+    },
+    {
+      "id": "ledger-baseline",
+      "kind": "foreshadow",
+      "scope": "main",
+      "description": "沈砚建立的措辞与动作账本，最终要用于识别一次违背既有基线的真话。",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["沈砚"],
+      "next_condition": "让沈砚记录至少三个人的原始措辞与风险选择。",
+      "due_chapter": 8
+    },
+    {
+      "id": "luo-trust-cost",
+      "kind": "arc",
+      "scope": "character",
+      "description": "罗绮必须至少一次用真实风险交换可信度，使职业偏见无法解释她的全部行为。",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["罗绮", "沈砚"],
+      "next_condition": "罗绮作出一项他人能够验证且失败会伤害她自己的承诺。",
+      "due_chapter": 6
+    },
+    {
+      "id": "gu-wording-trap",
+      "kind": "foreshadow",
+      "scope": "character",
+      "description": "顾闻对精确措辞的控制先为他取得优势，随后成为可以反制他的承诺。",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["顾闻"],
+      "next_condition": "顾闻要求另一人逐字定义一次接受、质疑或真实性承诺。",
+      "due_chapter": 7
+    },
+    {
+      "id": "ye-weakest-choice",
+      "kind": "arc",
+      "scope": "character",
+      "description": "叶晴保护处境最弱者的倾向需要自然出现两次，并在终局前产生无法回避的个人代价。",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["叶晴"],
+      "next_condition": "先让她在没有直接收益时关注或帮助一次风险最高的人。",
+      "due_chapter": 8
+    },
+    {
+      "id": "cheng-truth-performance",
+      "kind": "arc",
+      "scope": "character",
+      "description": "程野的表演习惯要成功误导一次，也要导致一次真实陈述被忽视。",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["程野"],
+      "next_condition": "程野以明显假动作掩盖真正关注点，并留下可供沈砚观察的重复习惯。",
+      "due_chapter": 7
+    },
+    {
+      "id": "program-and-choice",
+      "kind": "promise",
+      "scope": "main",
+      "description": "五人的旧事共同回答：遵守规则是否等于没有作出选择。",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["沈砚", "罗绮", "顾闻", "叶晴", "程野"],
+      "next_condition": "通过与当前选择有关的自然反应逐步露出旧事，不直接进行背景自白。",
+      "due_chapter": 10
+    },
+    {
+      "id": "first-elimination",
+      "kind": "conflict",
+      "scope": "main",
+      "description": "第一名淘汰者的失败必须能回溯到至少两次此前选择、错误判断或信任变化。",
+      "status": "planned",
+      "source_events": [],
+      "reader_chapters": [],
+      "characters": ["沈砚", "罗绮", "顾闻", "叶晴", "程野"],
+      "next_condition": "产生第一次有明确牌面依据的质疑或连续接受代价。",
+      "due_chapter": 5
+    }
+  ],
+  "pressures": [
+    {
+      "id": "no-empty-talk",
+      "reason": "连续讨论规则而没有出牌不会产生有效剧情变化",
+      "condition": "若多个回合没有出牌、质疑或生命变化，公开倒计时继续缩短，但不指定任何角色说真话或撒谎。",
+      "cost": "当前行动者失去控制第一手宣言方式的机会。",
+      "characters": ["沈砚", "罗绮", "顾闻", "叶晴", "程野"],
+      "status": "proposed",
+      "source_events": []
+    }
+  ],
+  "chapter_candidates": []
+}

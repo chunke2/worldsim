@@ -153,13 +153,13 @@
             <label class="flex items-center gap-2 text-xs"><input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.clear_api_key} />明确清除已保存密钥</label>
             <label class="text-xs">超时（秒；0 使用默认）<input type="number" min="0" step="1" class="input input-sm input-bordered w-full" bind:value={form.timeout_seconds} /></label>
             <label class="text-xs">服务并发上限（0 使用默认）<input type="number" min="0" step="1" class="input input-sm input-bordered w-full" bind:value={form.max_parallel} disabled={legacy} /></label>
-            <label class="text-xs md:col-span-2">可用模型目录（每行一个，或逗号分隔）<textarea class="textarea textarea-bordered w-full" rows="2" bind:value={form.models} disabled={legacy}></textarea></label>
+            <label class="text-xs md:col-span-2">可用模型目录（每行一个，或逗号分隔）<textarea class="textarea textarea-bordered w-full" rows="2" bind:value={form.models}></textarea></label>
           </div>
           <label class="flex gap-2 items-center text-xs"><input type="checkbox" class="checkbox checkbox-sm" bind:checked={form.url_strict} />保留地址中的 API 路径，仅补 /chat/completions（不自动插入 /v1）</label>
           <details><summary class="text-xs cursor-pointer">高级请求参数</summary>
             <label class="text-xs">extra_body（JSON 对象；留空保留，填写新对象替换）<textarea class="textarea textarea-bordered w-full font-mono" rows="2" bind:value={form.extra_body} placeholder={'例如 {"enable_thinking":false}'}></textarea></label>
           </details>
-          {#if legacy}<p class="text-xs">legacy-default 来自原有模拟管线，名称、模型目录和并发字段由兼容配置管理，不能删除。</p>{/if}
+          {#if legacy}<p class="text-xs">legacy-default 来自原有模拟管线；地址、密钥和模型目录与小说写手共用，因此只需配置一次。该服务不能删除。</p>{/if}
           <div class="flex flex-wrap gap-2">
             <button class="btn btn-primary btn-sm" on:click={saveProvider}>保存服务</button>
             {#if selected}
@@ -197,7 +197,7 @@
           {#each tiers as [tier, label]}
             <div class="border border-base-content/10 rounded-lg p-3 space-y-2">
               <h4 class="text-sm font-semibold">{label}</h4>
-              <AgentModelPicker {providers} prefix={'tier-' + tier} bind:providerID={config.tiers[tier].provider_id} bind:model={config.tiers[tier].model} disabled={busy || worldRunning} />
+              <AgentModelPicker {providers} bind:providerID={config.tiers[tier].provider_id} bind:model={config.tiers[tier].model} disabled={busy || worldRunning} />
               <details><summary class="text-xs cursor-pointer">独立运行预算与唤醒策略</summary>
                 <div class="grid grid-cols-2 gap-2 mt-2">
                   {#each [['max_tokens', '输出 Token 上限'], ['context_budget_tokens', '上下文 Token 预算'], ['max_parallel', '档位并发上限'], ['reflection_every', '每几轮反思']] as [key, title]}
@@ -218,7 +218,7 @@
               </div>
               <label class="text-xs flex items-center gap-2"><input type="checkbox" class="checkbox checkbox-sm" checked={!!character.model_override} on:change={e => toggleOverride(id, e.target.checked)} />为此人物单独指定模型</label>
               {#if character.model_override}
-                <AgentModelPicker {providers} prefix={'character-' + id} bind:providerID={character.model_override.provider_id} bind:model={character.model_override.model} disabled={busy || worldRunning} />
+                <AgentModelPicker {providers} bind:providerID={character.model_override.provider_id} bind:model={character.model_override.model} disabled={busy || worldRunning} />
               {:else}<p class="text-xs">跟随档位：{resolvedModel(config, id).provider_id || '未选择服务'} / {resolvedModel(config, id).model || '未填写模型'}</p>{/if}
             </div>
           {/each}

@@ -19,8 +19,7 @@ func (c *APIConfig) MigrateProviders() error {
 		c.Providers[LegacyProviderID] = Provider{
 			Name: "原有 API", Protocol: "openai_compatible", BaseURL: c.BaseURL,
 			APIKey: c.APIKey, TimeoutSeconds: c.HTTPTimeoutSeconds,
-			URLStrict: c.URLStrict, ExtraBody: c.ExtraBody,
-			// Leave the catalog open: legacy callers can select any tier model.
+			URLStrict: c.URLStrict, ExtraBody: c.ExtraBody, Models: append([]string{}, c.Models...),
 		}
 		if c.DefaultProvider == "" {
 			c.DefaultProvider = LegacyProviderID
@@ -145,6 +144,7 @@ func PublicAPIConfig(c *APIConfig) map[string]any {
 		"default_provider":      c.DefaultProvider,
 		"providers":             (ProviderRegistry{Providers: c.Providers}).PublicView(),
 		"model_tiers":           c.ModelTiers,
+		"models":                append([]string{}, c.Models...),
 	}
 	if c.Novel != nil {
 		view["novel"] = map[string]any{"model": c.Novel.Model, "max_tokens": c.Novel.MaxTokens, "http_timeout_seconds": c.Novel.HTTPTimeoutSeconds}

@@ -12,12 +12,12 @@ test('Provider patch omits blank credentials and advanced parameters', () => {
   assert.ok(!Object.hasOwn(result, 'extra_body'));
   assert.ok(!Object.hasOwn(result, 'clear_api_key'));
 });
-test('explicit replacement and clear are distinct; legacy fields are not overwritten', () => {
+test('explicit replacement and clear are distinct; legacy keeps a selectable model catalog', () => {
   assert.equal(providerPatch({ ...form(), api_key: ' new-key ' }).api_key, 'new-key');
   assert.equal(providerPatch({ ...form(), clear_api_key: true }).clear_api_key, true);
   assert.throws(() => providerPatch({ ...form(), clear_api_key: true, api_key: 'new' }));
   const legacy = providerPatch({ ...form(), extra_body: '{"enable_thinking":false}' }, true);
-  assert.ok(!Object.hasOwn(legacy, 'models'));
+  assert.deepEqual(legacy.models, ['cheap', 'strong']);
   assert.ok(!Object.hasOwn(legacy, 'max_parallel'));
   assert.deepEqual(legacy.extra_body, { enable_thinking: false });
   assert.throws(() => providerPatch({ ...form(), extra_body: '[]' }));

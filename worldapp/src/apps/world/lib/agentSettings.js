@@ -19,10 +19,10 @@ export function providerPatch(form, legacy = false) {
   const patch = {
     base_url: form.base_url.trim(), timeout_seconds: Number(form.timeout_seconds) || 0,
     url_strict: !!form.url_strict,
+    models: [...new Set(form.models.split(/[\n,]/).map(m => m.trim()).filter(Boolean))],
   };
   if (!legacy) Object.assign(patch, {
     name: form.name.trim(), protocol: 'openai_compatible',
-    models: [...new Set(form.models.split(/[\n,]/).map(m => m.trim()).filter(Boolean))],
     max_parallel: Number(form.max_parallel) || 0,
   });
   if (form.api_key.trim()) patch.api_key = form.api_key.trim();

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"worldsim/internal/fsutil"
 	"worldsim/internal/i18n"
 )
@@ -15,6 +16,7 @@ type APIConfig struct {
 	BaseURL             string              `json:"base_url"`
 	URLStrict           bool                `json:"url_strict,omitempty"` // true = 不自动插入 /v1，仅补 /chat/completions
 	Model               string              `json:"model"`
+	Models              []string            `json:"models,omitempty"`     // compatibility service model catalog for UI selection
 	MaxTokens           int                 `json:"max_tokens,omitempty"` // 0 = 模型默认；Agent 调用建议 ≥ 8192
 	HTTPTimeoutSeconds  int                 `json:"http_timeout_seconds"`
 	ContextBudgetTokens int                 `json:"context_budget_tokens"` // 全书优化上下文预算，默认 900000
@@ -77,6 +79,13 @@ func MergeAPIConfig(base *APIConfig, patch []byte) (*APIConfig, error) {
 	}
 	if out.MaxTokens < 0 || out.HTTPTimeoutSeconds < 0 {
 		return nil, fmt.Errorf("token 和超时不能为负数")
+	}
+	seenModels := map[string]bool{}
+	for _, model := range out.Models {
+		if strings.TrimSpace(model) == "" || model != strings.TrimSpace(model) || seenModels[model] {
+			return nil, fmt.Errorf("模型目录包含空白、重复或首尾空格")
+		}
+		seenModels[model] = true
 	}
 	if out.Novel != nil && (out.Novel.MaxTokens < 0 || out.Novel.HTTPTimeoutSeconds < 0) {
 		return nil, fmt.Errorf("小说生成 token 和超时不能为负数")
